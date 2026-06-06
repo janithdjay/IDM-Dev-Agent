@@ -1,15 +1,22 @@
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from backend.routers.home import router as home_router
 
 app = FastAPI(
     title="IDM Dev Agent",
     version="0.1.0"
 )
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <h1>IDM Dev Agent</h1>
-    <h3>Status: Running</h3>
-    <p>Version: 0.1.0</p>
-    """
+app.mount(
+    "/static",
+    StaticFiles(directory="frontend/static"),
+    name="static"
+)
+
+templates = Jinja2Templates(
+    directory="frontend/templates"
+)
+
+app.include_router(home_router)
