@@ -1,0 +1,2254 @@
+
+
+# ========================================
+# FILE: .\config.py
+# ========================================
+
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+DATA_DIR = BASE_DIR / "data"
+
+INDEX_DIR = DATA_DIR / "index"
+
+CACHE_DIR = DATA_DIR / "cache"
+
+SUPPORTED_EXTENSIONS = [
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".html",
+    ".css",
+    ".json"
+]
+
+IGNORED_DIRECTORIES = [
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "agent_env",
+    ".idea",
+    ".vscode"
+]
+
+# ========================================
+# FILE: .\backend\app.py
+# ========================================
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from backend.routers import home, projects, index, search, graph, analysis, graph, ui, agent, agent_query, agent_execute
+
+app = FastAPI(
+    title="IDM Dev Agent",
+    version="0.1.0"
+)
+
+app.mount(
+    "/static",
+    StaticFiles(directory="frontend/static"),
+    name="static"
+)
+
+templates = Jinja2Templates(
+    directory="frontend/templates"
+)
+
+app.include_router(home.router)
+app.include_router(projects.router)
+app.include_router(index.router)
+app.include_router(search.router)
+app.include_router(graph.router)
+app.include_router(analysis.router)
+app.include_router(graph.router)
+app.include_router(ui.router)
+app.include_router(agent.router)
+app.include_router(agent_query.router)
+app.include_router(agent_execute.router)
+
+# ========================================
+# FILE: .\backend\main.py
+# ========================================
+
+# .\backend\main.py
+import uvicorn
+from fastapi import FastAPI, Query
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
+
+# Import your existing pipeline modules
+from backend.services.agent.symbol_resolver import SymbolResolver
+from backend.services.context.context_builder import ContextBuilder
+from backend.services.agent.prompt_builder import PromptBuilder
+from backend.services.llm.ollama_client import OllamaClient
+
+app = FastAPI(title="IDM Dev Companion Agent")
+
+# Enable CORS so your web interface can talk to the backend hassle-free
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict this to your specific frontend port later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize global shared services (Point this to your indexed data folder)
+INDEX_DIR = Path("./index_data") 
+resolver = SymbolResolver(INDEX_DIR)
+context_builder = ContextBuilder(INDEX_DIR)
+prompt_builder = PromptBuilder()
+llm_client = OllamaClient()
+
+@app.get("/api/chat/stream")
+async def chat_stream(
+    question: str = Query(..., description="The user's debugging or code question"),
+    detected_symbol: str = Query(None, description="Optional symbol parsed out by the agent UI")
+):
+    """
+    Endpoint that streams codebase-aware intelligence tokens directly to the UI.
+    """
+    def token_generator():
+        # 1. Map user query/symbol to the precise target in your indexing layer
+        target_symbol = resolver.resolve(detected_symbol or question)
+        
+        # 2. Build out technical context if a relevant symbol is uncovered
+        symbol_data = {}
+        intent = "unknown"
+        
+        if target_symbol:
+            # Fall back to general explanation/intent map for the prompt context
+            intent = "explain_symbol" 
+            symbol_data = context_builder.build(target_symbol, intent=intent)
+        
+        # 3. Compile the rigid, engineering-focused systemic prompt layout
+        full_prompt = prompt_builder.build(
+            intent=intent,
+            symbol_data=symbol_data,
+            question=question
+        )
+        
+        # 4. Stream tokens down the pipe to the web UI
+        for token in llm_client.generate_stream(full_prompt):
+            yield token
+
+    # text/event-stream or text/plain tells the browser to process text iteratively
+    return StreamingResponse(token_generator(), media_type="text/plain")
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+
+# ========================================
+# FILE: .\backend\models\__init__.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\routers\agent.py
+# ========================================
+
+from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
+from pathlib import Path
+
+# Explicit imports pointing to your provided components
+from backend.services.reasoning.context_builder import ContextBuilder as ReasoningContextBuilder
+from backend.services.llm.prompt_builder import PromptBuilder
+from backend.services.llm.ollama_client import OllamaClient
+
+router = APIRouter(prefix="/api/agent", tags=["Agent"])
+
+# Path pointing to where your serialized index files live
+INDEX_PATH = Path("./index_data")
+
+# Instantiate layout-aware operational services
+context_builder = ReasoningContextBuilder(INDEX_PATH)
+prompt_builder = PromptBuilder()
+llm_client = OllamaClient()
+
+
+@router.get("/stream")
+async def stream_agent_response(
+    question: str = Query(..., description="The user query or code question"),
+    symbol_name: str = Query(None, description="Target symbol if explicitly extracted")
+):
+    """
+    Asynchronously streams repository context analysis back to the development chat frame.
+    """
+    def token_generator():
+        context_data = None
+        intent = "explain_symbol"
+
+        # Attempt structural reasoning lookups if a specific symbol is provided
+        if symbol_name:
+            context_data = context_builder.build(symbol_name)
+
+        # Fallback context dictionary if symbol parsing yielded nothing
+        if not context_data:
+            intent = "general_query"
+            context_data = {
+                "message": "No direct codebase symbol matches resolved for this request context."
+            }
+
+        # Build prompt using your precise layout format
+        full_prompt = prompt_builder.build(
+            question=question,
+            intent=intent,
+            context=context_data
+        )
+
+        # Stream generated tokens out of Ollama to the client connection
+        for token in llm_client.generate_stream(full_prompt):
+            yield token
+
+    return StreamingResponse(token_generator(), media_type="text/plain")
+
+# ========================================
+# FILE: .\backend\routers\agent_execute.py
+# ========================================
+
+from fastapi import APIRouter
+from backend.services.agent.execution_engine import ExecutionEngine
+
+engine = ExecutionEngine()
+
+router = APIRouter(
+    prefix="/agent",
+    tags=["Agent Execute"]
+)
+
+@router.post("/execute")
+def execute(payload: dict):
+
+    return engine.execute(
+        intent=payload["intent"],
+        symbol=payload.get("symbol"),
+        question=payload.get("question")
+    )
+
+# ========================================
+# FILE: .\backend\routers\agent_query.py
+# ========================================
+
+from fastapi import APIRouter
+
+from backend.services.agent.intent_classifier import IntentClassifier
+from backend.services.agent.entity_extractor import EntityExtractor
+
+router = APIRouter(
+    prefix="/agent",
+    tags=["Agent Query"]
+)
+
+classifier = IntentClassifier()
+extractor = EntityExtractor()
+
+
+@router.post("/classify")
+def classify(payload: dict):
+
+    question = payload.get("question", "")
+
+    intent = classifier.classify(question)
+    symbol = extractor.extract_symbol(question)
+
+    return {
+        "question": question,
+        "intent": intent.value,
+        "symbol": symbol
+    }
+
+# ========================================
+# FILE: .\backend\routers\analysis.py
+# ========================================
+
+from fastapi import APIRouter
+
+from backend.services.analysis.impact_analysis_service import ImpactAnalysisService
+from config import INDEX_DIR
+
+router = APIRouter(prefix="/analysis", tags=["Analysis"])
+
+service = ImpactAnalysisService(INDEX_DIR / "idm")
+
+
+@router.get("/impact/{symbol_name}")
+def impact(symbol_name: str, depth: int = 5):
+    return service.analyze(symbol_name, depth)
+
+# ========================================
+# FILE: .\backend\routers\graph.py
+# ========================================
+
+from fastapi import APIRouter
+
+from backend.services.graph.call_graph_service import CallGraphService
+from config import INDEX_DIR
+
+router = APIRouter(prefix="/graph", tags=["Graph"])
+
+service = CallGraphService(INDEX_DIR / "idm")
+
+
+@router.get("/data")
+def graph_data():
+    return service.build_graph()
+
+
+@router.get("/deps/{function_name}")
+def dependencies(function_name: str):
+    return service.get_dependencies(function_name)
+
+
+@router.get("/dependents/{function_name}")
+def dependents(function_name: str):
+    return service.get_dependents(function_name)
+
+# ========================================
+# FILE: .\backend\routers\home.py
+# ========================================
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+router = APIRouter()
+
+templates = Jinja2Templates(
+    directory="frontend/templates"
+)
+
+@router.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "title": "IDM Dev Agent",
+            "version": "0.1.0"
+        }
+    )
+
+# ========================================
+# FILE: .\backend\routers\index.py
+# ========================================
+
+from fastapi import APIRouter
+
+from backend.services.project_service import ProjectService
+from backend.services.indexing.index_service import IndexService
+from backend.services.indexing.serializer import IndexSerializer
+from config import DATA_DIR
+
+router = APIRouter(prefix="/index", tags=["Indexing"])
+
+project_service = ProjectService(f"{DATA_DIR}/projects.json")
+serializer = IndexSerializer(f"{DATA_DIR}/index")
+
+
+@router.post("/build/{project_id}")
+def build_index(project_id: str):
+    # 1. Load project config
+    project = project_service.get_project(project_id)
+
+    # 2. Create index service
+    index_service = IndexService(project)
+
+    # 3. Build index
+    result = index_service.build_index()
+
+    # 4. Save index
+    manifest = serializer.save(project_id, result)
+
+    return {
+        "status": "success",
+        "project_id": project_id,
+        "manifest": manifest
+    }
+
+@router.get("/status/{project_id}")
+def index_status(project_id: str):
+    import os
+
+    path = f"{DATA_DIR}/index/{project_id}/manifest.json"
+
+    if not os.path.exists(path):
+        return {
+            "project_id": project_id,
+            "indexed": False
+        }
+
+    return {
+        "project_id": project_id,
+        "indexed": True
+    }
+
+# ========================================
+# FILE: .\backend\routers\projects.py
+# ========================================
+
+from fastapi import APIRouter
+from backend.services.project_service import ProjectService
+from config import DATA_DIR
+
+router = APIRouter(prefix="/projects", tags=["Projects"])
+
+project_service = ProjectService(f"{DATA_DIR}/projects.json")
+
+
+@router.get("/")
+def list_projects():
+    return project_service.list_projects()
+
+
+@router.get("/{project_id}")
+def get_project(project_id: str):
+    return project_service.get_project(project_id)
+
+# ========================================
+# FILE: .\backend\routers\search.py
+# ========================================
+
+from fastapi import APIRouter
+
+from backend.services.search.search_service import SymbolSearchService
+from config import INDEX_DIR
+
+router = APIRouter(prefix="/search", tags=["Search"])
+
+search_service = SymbolSearchService(INDEX_DIR / "idm")
+
+
+@router.get("/symbols")
+def search_symbols(q: str):
+    return search_service.search(q)
+
+
+@router.get("/symbols/type/{symbol_type}")
+def search_by_type(symbol_type: str):
+    return search_service.search_by_type(symbol_type)
+
+# ========================================
+# FILE: .\backend\routers\ui.py
+# ========================================
+
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+from pathlib import Path
+
+router = APIRouter()
+
+@router.get("/graph", response_class=HTMLResponse)
+def graph_ui():
+    html_path = Path("frontend/templates/graph.html")
+    return html_path.read_text(encoding="utf-8")
+
+# ========================================
+# FILE: .\backend\routers\__init__.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\ai_service.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\project_service.py
+# ========================================
+
+from pathlib import Path
+import json
+
+
+class ProjectService:
+    def __init__(self, projects_file: str):
+        self.projects_file = Path(projects_file)
+        self._projects_cache = None
+
+    def _load_projects(self):
+        if self._projects_cache:
+            return self._projects_cache
+
+        if not self.projects_file.exists():
+            raise FileNotFoundError("projects.json not found")
+
+        data = json.loads(self.projects_file.read_text(encoding="utf-8"))
+        self._projects_cache = data["projects"]
+        return self._projects_cache
+
+    def get_project(self, project_id: str):
+        projects = self._load_projects()
+
+        for p in projects:
+            if p["project_id"] == project_id:
+                return p
+
+        raise ValueError(f"Project not found: {project_id}")
+
+    def list_projects(self):
+        return self._load_projects()
+
+# ========================================
+# FILE: .\backend\services\search_service.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\trace_service.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\__init__.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\agent\context_compressor.py
+# ========================================
+
+class ContextCompressor:
+
+    def compress(self, context: dict, intent: str):
+
+        compressed = dict(context)
+
+        if intent == "explain_symbol":
+            compressed["calls"] = context.get("calls", [])[:20]
+            compressed["related_symbols"] = context.get("related_symbols", [])[:10]
+
+            reasoning = context.get("reasoning", {})
+
+            compressed["reasoning"] = {
+                "callers_chain": reasoning.get("callers_chain", [])[:5],
+                "callees_chain": reasoning.get("callees_chain", [])[:5],
+            }
+
+        elif intent == "find_callers":
+
+            compressed = {
+                "symbol": context.get("symbol"),
+                "called_by": context.get("called_by", []),
+                "reasoning": context.get("reasoning", {}),
+            }
+
+        return compressed
+
+# ========================================
+# FILE: .\backend\services\agent\entity_extractor.py
+# ========================================
+
+import re
+
+from config import INDEX_DIR
+from backend.services.agent.symbol_resolver import SymbolResolver
+
+
+class EntityExtractor:
+
+    def __init__(self):
+
+        self.resolver = SymbolResolver(
+            INDEX_DIR / "idm"
+        )
+
+    def extract_symbol(self, question: str):
+
+        patterns = [
+
+            r"where\s+is\s+([A-Za-z_][A-Za-z0-9_]*)\(?\)?\s+called",
+            r"who\s+calls\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"explain\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"what\s+does\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"can\s+i\s+delete\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"safe\s+to\s+remove\s+([A-Za-z_][A-Za-z0-9_]*)"
+
+        ]
+
+        candidate = None
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                question,
+                re.IGNORECASE
+            )
+
+            if match:
+                candidate = match.group(1)
+                break
+
+        if candidate is None:
+            return None
+        
+        return self.resolver.resolve(candidate)
+
+# ========================================
+# FILE: .\backend\services\agent\execution_engine.py
+# ========================================
+
+from backend.services.context.context_builder import ContextBuilder
+from backend.services.llm.ollama_client import OllamaClient
+from backend.services.agent.prompt_builder import PromptBuilder
+from backend.services.agent.reasoning_engine import ReasoningEngine
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.cache.context_cache import ContextCache
+from backend.services.agent.context_compressor import ContextCompressor
+from config import INDEX_DIR
+import time
+
+
+class ExecutionEngine:
+
+    def __init__(self):
+
+        self.context_builder = ContextBuilder(INDEX_DIR / "idm")
+        self.graph_service = CallGraphService(INDEX_DIR / "idm")
+        self.prompt_builder = PromptBuilder()
+        # self.llm = OllamaClient(model="qwen2.5-coder:7b")
+        self.llm = OllamaClient(model="qwen2.5-coder:3b")
+        self.reasoning_engine = ReasoningEngine(self.graph_service)
+        self.cache = ContextCache(ttl_seconds=300)
+        self.compressor = ContextCompressor()
+        
+
+    def execute(self, intent: str, symbol: str, question: str = None):
+        start = time.perf_counter()
+
+        # 1. Build cached context
+        cache_key = f"{intent}:{symbol}"
+
+        context = self.cache.get(cache_key)
+        if not context:
+            context = self.context_builder.build(
+                symbol_name=symbol,
+                intent=intent
+            )
+            self.cache.set(cache_key, context)
+        print("=" * 60)
+        print("Intent:", intent)
+        print("Context keys:", list(context.keys()))
+        print(
+            "Context chars:",
+            len(str(context))
+        )
+        print("=" * 60)
+
+        if not context:
+            return {"error": "Symbol not found"}
+        
+        t1 = time.perf_counter()
+        print(f"Context: {t1 - start:.3f}s")
+
+        reasoning_key = f"reasoning:{symbol}"
+
+        reasoning_context = self.cache.get(reasoning_key)
+        if not reasoning_context:
+            reasoning_context = self.reasoning_engine.build_reasoning_context(symbol)
+            self.cache.set(reasoning_key, reasoning_context)
+            
+        t2 = time.perf_counter()
+        print(f"Reasoning: {t2 - t1:.3f}s")
+
+        context = {
+            **context,
+            "reasoning": reasoning_context
+        }
+
+        # 2. FAST PATH (NO LLM)
+        if intent == "find_callers":
+            return {
+                "symbol": symbol,
+                "intent": intent,
+                "answer": context.get("called_by", []),
+                "context_used": context
+            }
+
+        # 3. LLM PATH
+        compressed_context = self.compressor.compress(
+            context=context,
+            intent=intent
+        )
+        
+        print("=" * 60)
+        prompt = self.prompt_builder.build(
+            intent=intent,
+            symbol_data=compressed_context,
+            question=question
+        )
+        print("Prompt length:", len(prompt))
+        print("=" * 60)
+        
+        t3 = time.perf_counter()
+        print(f"Prompt: {t3 - t2:.3f}s")
+
+        response = self.llm.generate(prompt)
+
+        t4 = time.perf_counter()
+
+        print(f"LLM: {t4 - t3:.3f}s")
+        print(f"TOTAL: {t4 - start:.3f}s")
+        print("=" * 60)
+
+        return {
+            "symbol": symbol,
+            "intent": intent,
+            "answer": response,
+            "context_used": compressed_context
+        }
+
+# ========================================
+# FILE: .\backend\services\agent\execution_router.py
+# ========================================
+
+from backend.services.graph.call_graph_service import CallGraphService
+
+
+class ExecutionRouter:
+
+    DETERMINISTIC_INTENTS = {
+        "find_callers",
+        "find_dependencies",
+        "find_related",
+    }
+
+    def should_use_llm(self, intent: str) -> bool:
+        return intent not in self.DETERMINISTIC_INTENTS
+
+# ========================================
+# FILE: .\backend\services\agent\intent_classifier.py
+# ========================================
+
+import re
+
+from backend.services.agent.query_models import Intent
+
+
+class IntentClassifier:
+
+    def classify(self, question: str):
+
+        q = question.lower().strip()
+
+        # -------------------
+        # Find Callers
+        # -------------------
+
+        if re.search(r"where.*called", q):
+            return Intent.FIND_CALLERS
+
+        if re.search(r"who.*calls", q):
+            return Intent.FIND_CALLERS
+
+        if re.search(r"called by", q):
+            return Intent.FIND_CALLERS
+
+        # -------------------
+        # Explain Symbol
+        # -------------------
+
+        if re.search(r"what.*does", q):
+            return Intent.EXPLAIN_SYMBOL
+
+        if re.search(r"explain", q):
+            return Intent.EXPLAIN_SYMBOL
+
+        if re.search(r"how.*works", q):
+            return Intent.EXPLAIN_SYMBOL
+
+        if re.search(r"how.*implemented", q):
+            return Intent.EXPLAIN_SYMBOL
+
+        # -------------------
+        # Impact Analysis
+        # -------------------
+
+        if re.search(r"can.*delete", q):
+            return Intent.IMPACT_ANALYSIS
+
+        if re.search(r"safe.*remove", q):
+            return Intent.IMPACT_ANALYSIS
+
+        if re.search(r"what.*depends", q):
+            return Intent.IMPACT_ANALYSIS
+
+        if re.search(r"impact", q):
+            return Intent.IMPACT_ANALYSIS
+
+        # -------------------
+        # Dependency Analysis
+        # -------------------
+
+        if re.search(r"uses", q):
+            return Intent.DEPENDENCY_ANALYSIS
+
+        if re.search(r"depends on", q):
+            return Intent.DEPENDENCY_ANALYSIS
+
+        if re.search(r"references", q):
+            return Intent.DEPENDENCY_ANALYSIS
+
+        # -------------------
+
+        return Intent.UNKNOWN
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_builder.py
+# ========================================
+
+from typing import Dict, Any, List
+
+
+class PromptBuilder:
+    """
+    Central prompt construction layer for the agent.
+    This ensures deterministic, structured, debug-focused outputs.
+    """
+
+    def __init__(self):
+        pass
+
+    def build(self, intent: str, symbol_data: Dict[str, Any], question: str) -> str:
+        """
+        Build a structured prompt for the LLM.
+        """
+
+        base_instructions = self._system_instructions()
+
+        intent_prompt = self._intent_prompt(intent)
+
+        context_block = self._build_context(symbol_data)
+
+        return f"""
+{base_instructions}
+
+{intent_prompt}
+
+# USER QUESTION
+{question}
+
+# CODE CONTEXT
+{context_block}
+
+# INSTRUCTIONS
+- Be precise and technical
+- Focus only on the provided code context
+- Do not hallucinate functions or files not present
+- If something is unclear, say "unknown from context"
+- Keep response structured and concise
+# OUTPUT FORMAT
+Return your response in this exact structure:
+
+## Summary
+Brief explanation of what the symbol does.
+
+## Analysis
+Detailed technical breakdown based only on provided context.
+
+## Key Observations
+Important behaviors, dependencies, or patterns.
+
+## Call Flow / Usage
+Where and how it is used in the system.
+
+## Potential Issues (if any)
+Risks, coupling, performance concerns, or unclear logic.
+"""
+
+    # -------------------------
+
+    def _system_instructions(self) -> str:
+        return """
+        You are a senior software engineering assistant embedded inside a codebase analysis system.
+
+        Your job is to help developers debug, understand, and reason about a local codebase.
+
+        You do NOT behave like a chatbot.
+
+        You behave like a static analysis + reasoning engine.
+        """
+
+    def _intent_prompt(self, intent: str) -> str:
+        if intent == "explain_symbol":
+            return """
+            TASK:
+            Explain the given symbol from the codebase.
+
+            Focus:
+            - What it does
+            - Where it is used
+            - What it interacts with
+            """
+
+        if intent == "find_callers":
+            return """
+            TASK:
+            Find where this symbol is called in the system.
+
+            Focus:
+            - Direct callers
+            - Indirect callers (via wrappers)
+            - Class / worker / async chains
+            """
+
+        if intent == "unknown":
+            return """
+            TASK:
+            Try to interpret developer intent using code context only.
+            """
+
+        if intent == "impact_analysis":
+            return """
+            TASK:
+
+            Analyze the impact of modifying or deleting this symbol.
+
+            Focus:
+
+            - direct callers
+            - indirect callers
+            - related methods
+            - possible side effects
+            - refactoring risks
+            """
+
+        if intent == "dependency_analysis":
+            return """
+            TASK:
+
+            Analyze dependencies involving this symbol.
+
+            Focus:
+
+            - incoming dependencies
+            - outgoing dependencies
+            - coupling
+            - architecture implications
+            """
+
+        return "TASK: General code analysis."
+
+    def _build_context(self, symbol_data: Dict[str, Any]) -> str:
+        if not symbol_data:
+            return "No symbol context found."
+
+        lines = []
+
+        lines.append(f"Symbol: {symbol_data.get('symbol')}")
+        lines.append(f"Type: {symbol_data.get('type')}")
+        lines.append(f"File: {symbol_data.get('file')}")
+        lines.append(f"Parent: {symbol_data.get('parent')}")
+
+        calls = symbol_data.get("calls", [])
+        if calls:
+            lines.append("\nDirect Calls:")
+            lines.append(", ".join(calls[:20]))  # prevent prompt explosion
+
+        related = symbol_data.get("related_symbols", [])
+        if related:
+            lines.append("\nRelated Symbols:")
+            lines.append(", ".join(related[:10]))
+
+        callers = symbol_data.get("called_by", [])
+        if callers:
+            lines.append("\nCalled By:")
+            for c in callers[:10]:
+                lines.append(f"- {c}")
+                
+        reasoning = symbol_data.get("reasoning", {})
+
+        if reasoning:
+            lines.append("\nCall Graph Reasoning:")
+
+            callers = reasoning.get("callers_chain", [])
+            if callers:
+                lines.append("\nCallers Chain:")
+                for c in callers[:10]:
+                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
+
+            callees = reasoning.get("callees_chain", [])
+            if callees:
+                lines.append("\nCallees Chain:")
+                for c in callees[:10]:
+                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
+
+        return "\n".join(lines)
+
+# ========================================
+# FILE: .\backend\services\agent\query_models.py
+# ========================================
+
+from enum import Enum
+
+
+class Intent(Enum):
+
+    EXPLAIN_SYMBOL = "explain_symbol"
+
+    FIND_CALLERS = "find_callers"
+
+    FIND_CALLEES = "find_callees"
+
+    IMPACT_ANALYSIS = "impact_analysis"
+
+    FIND_FILE = "find_file"
+    
+    DEPENDENCY_ANALYSIS = "dependency_analysis"
+
+    UNKNOWN = "unknown"
+
+# ========================================
+# FILE: .\backend\services\agent\query_router.py
+# ========================================
+
+class QueryRouter:
+
+    def route(self, intent, symbol):
+
+        if intent.value == "find_callers":
+            return {
+                "action": "call_graph.get_dependents",
+                "symbol": symbol
+            }
+
+        if intent.value == "find_callees":
+            return {
+                "action": "call_graph.get_dependencies",
+                "symbol": symbol
+            }
+
+        if intent.value == "explain_symbol":
+            return {
+                "action": "context_builder.build",
+                "symbol": symbol
+            }
+
+        return None
+
+# ========================================
+# FILE: .\backend\services\agent\reasoning_engine.py
+# ========================================
+
+from collections import deque
+
+
+class ReasoningEngine:
+    """
+    Expands symbol context using call graph relationships.
+    Enables multi-hop reasoning for debugging questions.
+    """
+
+    def __init__(self, graph_service):
+        self.graph = graph_service
+
+    def build_reasoning_context(self, symbol: str, max_depth: int = 2):
+        """
+        Expands:
+        - callers
+        - callees
+        - indirect chains
+        """
+
+        visited = set()
+        queue = deque([(symbol, 0)])
+
+        callers_map = self.graph.build_graph().get("called_by", {})
+        calls_map = self.graph.build_graph().get("calls", {})
+
+        result = {
+            "root": symbol,
+            "callers_chain": [],
+            "callees_chain": []
+        }
+
+        while queue:
+            node, depth = queue.popleft()
+
+            if node in visited or depth > max_depth:
+                continue
+
+            visited.add(node)
+
+            # callers
+            for caller in callers_map.get(node, []):
+                result["callers_chain"].append({
+                    "from": caller,
+                    "to": node,
+                    "depth": depth + 1
+                })
+                queue.append((caller, depth + 1))
+
+            # callees
+            for callee in calls_map.get(node, []):
+                result["callees_chain"].append({
+                    "from": node,
+                    "to": callee,
+                    "depth": depth + 1
+                })
+                queue.append((callee, depth + 1))
+
+        return result
+
+# ========================================
+# FILE: .\backend\services\agent\symbol_resolver.py
+# ========================================
+
+import json
+from pathlib import Path
+
+
+class SymbolResolver:
+
+    def __init__(self, index_path: Path):
+
+        self.index_path = Path(index_path)
+
+        self.symbols = self._load_symbols()
+
+    def _load_symbols(self):
+
+        file = self.index_path / "symbols.json"
+
+        if not file.exists():
+            return []
+
+        return json.loads(
+            file.read_text(encoding="utf-8")
+        )
+
+    def resolve(self, candidate: str):
+
+        if not candidate:
+            return None
+
+        candidate = candidate.lower().strip()
+
+        # Exact match
+        for symbol in self.symbols:
+
+            if symbol["name"].lower() == candidate:
+                return symbol["name"]
+
+        # Ignore spaces vs underscores
+        normalized = candidate.replace(" ", "_")
+
+        for symbol in self.symbols:
+
+            if symbol["name"].lower() == normalized:
+                return symbol["name"]
+
+        # Ignore underscores completely
+        normalized = normalized.replace("_", "")
+
+        for symbol in self.symbols:
+
+            if symbol["name"].lower().replace("_", "") == normalized:
+                return symbol["name"]
+
+        return None
+
+# ========================================
+# FILE: .\backend\services\agent\__init__.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\analysis\impact_analysis_service.py
+# ========================================
+
+import json
+from pathlib import Path
+from collections import defaultdict, deque
+
+
+class ImpactAnalysisService:
+    def __init__(self, index_path: str):
+        self.index_path = Path(index_path)
+        self.symbols = self._load_symbols()
+        self.graph = self._build_reverse_graph()
+
+    def _load_symbols(self):
+        file = self.index_path / "symbols.json"
+
+        if not file.exists():
+            return []
+
+        return json.loads(file.read_text(encoding="utf-8"))
+
+    def _build_reverse_graph(self):
+        reverse_graph = defaultdict(list)
+
+        for sym in self.symbols:
+            caller = sym["name"]
+            calls = sym.get("calls", [])
+
+            for callee in calls:
+                reverse_graph[callee].append(caller)
+
+        return reverse_graph
+
+    def analyze(self, symbol_name: str, max_depth: int = 5):
+        """
+        Returns all impacted functions (who depends on this symbol)
+        """
+
+        visited = set()
+        queue = deque([(symbol_name, 0)])
+        impacted = set()
+
+        while queue:
+            current, depth = queue.popleft()
+
+            if depth >= max_depth:
+                continue
+
+            for caller in self.graph.get(current, []):
+                if caller not in visited:
+                    visited.add(caller)
+                    impacted.add(caller)
+                    queue.append((caller, depth + 1))
+
+        return {
+            "symbol": symbol_name,
+            "max_depth": max_depth,
+            "impacted_count": len(impacted),
+            "impacted_symbols": list(impacted)
+        }
+
+# ========================================
+# FILE: .\backend\services\cache\context_cache.py
+# ========================================
+
+import time
+
+
+class ContextCache:
+    """
+    Simple in-memory cache for symbol context + reasoning.
+    """
+
+    def __init__(self, ttl_seconds: int = 300):
+        self.ttl = ttl_seconds
+        self.cache = {}
+
+    def get(self, key: str):
+        entry = self.cache.get(key)
+
+        if not entry:
+            return None
+
+        value, timestamp = entry
+
+        if time.time() - timestamp > self.ttl:
+            del self.cache[key]
+            return None
+
+        return value
+
+    def set(self, key: str, value):
+        self.cache[key] = (value, time.time())
+
+    def clear(self):
+        self.cache.clear()
+
+# ========================================
+# FILE: .\backend\services\context\context_builder.py
+# ========================================
+
+import json
+from pathlib import Path
+
+
+class ContextBuilder:
+
+    def __init__(self, index_path: Path):
+
+        self.index_path = Path(index_path)
+
+        self.symbols = self._load_symbols()
+
+        self.name_index = {
+            s["name"]: s for s in self.symbols
+        }
+
+    def _load_symbols(self):
+
+        file = self.index_path / "symbols.json"
+
+        if not file.exists():
+            return []
+
+        return json.loads(
+            file.read_text(
+                encoding="utf-8"
+            )
+        )
+
+    # -----------------------------------
+    # PUBLIC ENTRY
+    # -----------------------------------
+
+    def build(
+        self,
+        symbol_name: str,
+        intent: str = None
+    ):
+
+        symbol = self.name_index.get(symbol_name)
+
+        if not symbol:
+            return None
+
+        if intent == "find_callers":
+            return self._build_find_callers(
+                symbol_name
+            )
+
+        if intent == "impact_analysis":
+            return self._build_impact(
+                symbol
+            )
+
+        if intent == "dependency_analysis":
+            return self._build_dependency(
+                symbol
+            )
+
+        if intent == "explain_symbol":
+            return self._build_explain(
+                symbol
+            )
+
+        return self._build_default(
+            symbol
+        )
+
+    # -----------------------------------
+    # EXPLAIN
+    # -----------------------------------
+
+    def _build_explain(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get("type"),
+
+            "parent": symbol.get("parent"),
+
+            "file": symbol.get("file"),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "related_symbols":
+                self._find_related(symbol)
+
+        }
+
+    # -----------------------------------
+    # FIND CALLERS
+    # -----------------------------------
+
+    def _build_find_callers(
+        self,
+        symbol_name
+    ):
+
+        return {
+
+            "symbol": symbol_name,
+
+            "called_by":
+                self._find_callers(
+                    symbol_name
+                )
+
+        }
+
+    # -----------------------------------
+    # IMPACT
+    # -----------------------------------
+
+    def _build_impact(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get(
+                "type"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "called_by":
+                self._find_callers(
+                    symbol["name"]
+                ),
+
+            "related_symbols":
+                self._find_related(
+                    symbol
+                )
+
+        }
+
+    # -----------------------------------
+    # DEPENDENCY
+    # -----------------------------------
+
+    def _build_dependency(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            )
+
+        }
+
+    # -----------------------------------
+    # DEFAULT
+    # -----------------------------------
+
+    def _build_default(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get(
+                "type"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "called_by":
+                self._find_callers(
+                    symbol["name"]
+                ),
+
+            "related_symbols":
+                self._find_related(
+                    symbol
+                )
+
+        }
+
+    # -----------------------------------
+    # REVERSE LOOKUP
+    # -----------------------------------
+
+    def _find_callers(
+        self,
+        symbol_name
+    ):
+
+        callers = []
+
+        for s in self.symbols:
+
+            if symbol_name in s.get(
+                "calls",
+                []
+            ):
+
+                callers.append({
+
+                    "name": s["name"],
+
+                    "type": s.get(
+                        "type"
+                    ),
+
+                    "parent": s.get(
+                        "parent"
+                    )
+
+                })
+
+        return callers
+
+    # -----------------------------------
+    # RELATED
+    # -----------------------------------
+
+    def _find_related(
+        self,
+        symbol
+    ):
+
+        related = []
+
+        parent = symbol.get(
+            "parent"
+        )
+
+        if parent:
+
+            for s in self.symbols:
+
+                if (
+                    s.get("parent") == parent
+                    and s["name"] != symbol["name"]
+                ):
+
+                    related.append(
+                        f"{parent}.{s['name']}"
+                    )
+
+        return related
+
+# ========================================
+# FILE: .\backend\services\graph\call_graph_service.py
+# ========================================
+
+import json
+from pathlib import Path
+from collections import defaultdict
+
+
+class CallGraphService:
+    def __init__(self, index_path: str):
+        self.index_path = Path(index_path)
+        self.symbols = self._load_symbols()
+
+    def _load_symbols(self):
+        file = self.index_path / "symbols.json"
+
+        if not file.exists():
+            return []
+
+        return json.loads(file.read_text(encoding="utf-8"))
+
+    def build_graph(self):
+        graph = defaultdict(list)
+        reverse_graph = defaultdict(list)
+
+        for sym in self.symbols:
+            caller = sym["name"]
+            calls = sym.get("calls", [])
+
+            for callee in calls:
+                graph[caller].append(callee)
+                reverse_graph[callee].append(caller)
+
+        return {
+            "calls": dict(graph),
+            "called_by": dict(reverse_graph)
+        }
+    
+
+    def get_dependencies(self, function_name: str):
+        graph = self.build_graph()["calls"]
+        return graph.get(function_name, [])
+
+    def get_dependents(self, function_name: str):
+        reverse = self.build_graph()["called_by"]
+        return reverse.get(function_name, [])
+
+# ========================================
+# FILE: .\backend\services\indexing\builder.py
+# ========================================
+
+from .models import FileEntry
+
+
+class IndexBuilder:
+    def build_file_entry(self, path, symbols, imports):
+        return FileEntry(
+            file_id=str(path),
+            path=str(path),
+            language="python",
+            lines=0,
+            symbols=[s.symbol_id for s in symbols],
+            imports=[i.module for i in imports]
+        )
+
+# ========================================
+# FILE: .\backend\services\indexing\index_service.py
+# ========================================
+
+from pathlib import Path
+
+from .scanner import ProjectScanner
+from .python_parser import PythonParser
+from .builder import IndexBuilder
+
+
+class IndexService:
+    def __init__(self, project_config: dict):
+        self.project_id = project_config["project_id"]
+        self.root_path = project_config["root_path"]
+        self.scanner = ProjectScanner(self.root_path)
+        self.parser = PythonParser()
+        self.builder = IndexBuilder()
+
+        self.serializer = None
+
+        self.files = []
+        self.symbols = []
+        self.imports = []
+
+    def build_index(self):
+        file_paths = self.scanner.scan()
+
+        for file_path in file_paths:
+            source = Path(file_path).read_text(encoding="utf-8")
+
+            symbols, imports = self.parser.parse(
+                str(file_path),
+                source
+            )
+
+            self.symbols.extend(symbols)
+            self.imports.extend(imports)
+
+            file_entry = self.builder.build_file_entry(
+                file_path,
+                symbols,
+                imports
+            )
+
+            self.files.append(file_entry)
+
+        return {
+            "files": self.files,
+            "symbols": self.symbols,
+            "imports": self.imports
+        }
+
+# ========================================
+# FILE: .\backend\services\indexing\models.py
+# ========================================
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class FileEntry:
+    file_id: str
+    path: str
+    language: str
+    lines: int
+
+    symbols: List[str] = field(default_factory=list)
+    imports: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SymbolEntry:
+    symbol_id: str
+    name: str
+    type: str  # function | class | method | variable
+
+    file: str
+
+    start_line: int
+    end_line: int
+
+    parent: Optional[str] = None
+
+    calls: List[str] = field(default_factory=list)
+    referenced_vars: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ImportEntry:
+    file: str
+    module: str
+    alias: Optional[str]
+    type: str  # stdlib | third_party | local
+
+# ========================================
+# FILE: .\backend\services\indexing\python_parser.py
+# ========================================
+
+import ast
+
+from .models import SymbolEntry
+from .utils import generate_id
+
+
+class CallVisitor(ast.NodeVisitor):
+
+    def __init__(self):
+        self.calls = []
+
+    def visit_Call(self, node):
+
+        if isinstance(node.func, ast.Name):
+            self.calls.append(node.func.id)
+
+        elif isinstance(node.func, ast.Attribute):
+            self.calls.append(node.func.attr)
+
+        self.generic_visit(node)
+
+
+class PythonParser:
+
+    def parse(self, file_path: str, source_code: str):
+        tree = ast.parse(source_code)
+
+        symbols = []
+        imports = []
+
+        # -----------------------
+        # Top-level functions
+        # -----------------------
+
+        for node in tree.body:
+
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+                visitor = CallVisitor()
+                visitor.visit(node)
+
+                symbols.append(
+                    SymbolEntry(
+                        symbol_id=generate_id(),
+                        name=node.name,
+                        type="function",
+                        file=file_path,
+                        start_line=node.lineno,
+                        end_line=getattr(node, "end_lineno", node.lineno),
+                        parent=None,
+                        calls=visitor.calls,
+                        referenced_vars=[]
+                    )
+                )
+
+            # -----------------------
+            # Classes
+            # -----------------------
+
+            elif isinstance(node, ast.ClassDef):
+                class_visitor = CallVisitor()
+                class_visitor.visit(node)
+
+                symbols.append(
+                    SymbolEntry(
+                        symbol_id=generate_id(),
+                        name=node.name,
+                        type="class",
+                        file=file_path,
+                        start_line=node.lineno,
+                        end_line=getattr(node, "end_lineno", node.lineno),
+                        parent=None,
+                        calls=class_visitor.calls,
+                        referenced_vars=[]
+                    )
+                )
+
+                # -----------------------
+                # Methods
+                # -----------------------
+
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        method_visitor = CallVisitor()
+                        method_visitor.visit(child)
+
+                        symbols.append(
+                            SymbolEntry(
+                                symbol_id=generate_id(),
+                                name=child.name,
+                                type="method",
+                                file=file_path,
+                                start_line=child.lineno,
+                                end_line=getattr(
+                                    child,
+                                    "end_lineno",
+                                    child.lineno
+                                ),
+                                parent=node.name,
+                                calls=method_visitor.calls,
+                                referenced_vars=[]
+                            )
+                        )
+
+        return symbols, imports
+
+# ========================================
+# FILE: .\backend\services\indexing\scanner.py
+# ========================================
+
+from pathlib import Path
+from typing import List
+
+
+class ProjectScanner:
+    def __init__(self, root_path: str, ignore_dirs=None):
+        self.root_path = Path(root_path)
+        self.ignore_dirs = ignore_dirs or {".git", "__pycache__", "venv", ".venv"}
+
+    def scan(self) -> List[Path]:
+        files = []
+
+        for path in self.root_path.rglob("*"):
+            if path.is_dir():
+                continue
+
+            if any(part in self.ignore_dirs for part in path.parts):
+                continue
+
+            if path.suffix == ".py":
+                files.append(path)
+
+        return files
+
+# ========================================
+# FILE: .\backend\services\indexing\serializer.py
+# ========================================
+
+from pathlib import Path
+import json
+from datetime import datetime
+
+from .models import FileEntry, SymbolEntry, ImportEntry
+
+
+class IndexSerializer:
+    def __init__(self, base_path: str):
+        self.base_path = Path(base_path)
+
+    def _ensure_dir(self, project_id: str):
+        project_dir = self.base_path / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        return project_dir
+
+    def _to_dict_file(self, file: FileEntry):
+        return {
+            "file_id": file.file_id,
+            "path": file.path,
+            "language": file.language,
+            "lines": file.lines,
+            "symbols": file.symbols,
+            "imports": file.imports
+        }
+
+    def _to_dict_symbol(self, symbol: SymbolEntry):
+        return {
+            "symbol_id": symbol.symbol_id,
+            "name": symbol.name,
+            "type": symbol.type,
+            "file": symbol.file,
+            "start_line": symbol.start_line,
+            "end_line": symbol.end_line,
+            "parent": symbol.parent,
+            "calls": symbol.calls,
+            "referenced_vars": symbol.referenced_vars
+        }
+
+    def _to_dict_import(self, imp: ImportEntry):
+        return {
+            "file": imp.file,
+            "module": imp.module,
+            "alias": imp.alias,
+            "type": imp.type
+        }
+
+    def save(self, project_id: str, index_data: dict):
+        project_dir = self._ensure_dir(project_id)
+
+        files = index_data["files"]
+        symbols = index_data["symbols"]
+        imports = index_data["imports"]
+
+        # Convert objects → dicts
+        files_json = [self._to_dict_file(f) for f in files]
+        symbols_json = [self._to_dict_symbol(s) for s in symbols]
+        imports_json = [self._to_dict_import(i) for i in imports]
+
+        # Write files
+        (project_dir / "files.json").write_text(
+            json.dumps(files_json, indent=2),
+            encoding="utf-8"
+        )
+
+        (project_dir / "symbols.json").write_text(
+            json.dumps(symbols_json, indent=2),
+            encoding="utf-8"
+        )
+
+        (project_dir / "imports.json").write_text(
+            json.dumps(imports_json, indent=2),
+            encoding="utf-8"
+        )
+
+        # Manifest
+        manifest = {
+            "project_id": project_id,
+            "indexed_at": datetime.utcnow().isoformat(),
+            "files_count": len(files_json),
+            "symbols_count": len(symbols_json),
+            "imports_count": len(imports_json),
+            "files_index": "files.json",
+            "symbols_index": "symbols.json",
+            "imports_index": "imports.json"
+        }
+
+        (project_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2),
+            encoding="utf-8"
+        )
+
+        return manifest
+
+# ========================================
+# FILE: .\backend\services\indexing\utils.py
+# ========================================
+
+import uuid
+
+
+def generate_id() -> str:
+    return str(uuid.uuid4())
+
+# ========================================
+# FILE: .\backend\services\llm\ollama_client.py
+# ========================================
+
+import requests
+import json
+import time
+from typing import Generator
+
+
+class OllamaClient:
+
+    def __init__(
+        self,
+        base_url="http://localhost:11434",
+        model="qwen2.5-coder:7b"
+    ):
+        self.base_url = base_url
+        self.model = model
+
+    def generate(self, prompt: str):
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 250
+            }
+        }
+
+        start = time.perf_counter()
+        response = requests.post(url, json=payload)
+        elapsed = time.perf_counter() - start
+
+        print("=" * 60)
+        print(f"Ollama inference: {elapsed:.2f}s")
+        print("=" * 60)
+
+        if response.status_code != 200:
+            return {
+                "error": "LLM request failed",
+                "details": response.text
+            }
+
+        data = response.json()
+        return data.get("response", "")
+
+    def generate_stream(self, prompt: str) -> Generator[str, None, None]:
+        """
+        Streams response tokens dynamically from the local Ollama instance line-by-line.
+        """
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": 0.1
+            }
+        }
+
+        try:
+            response = requests.post(url, json=payload, stream=True)
+            if response.status_code != 200:
+                yield f"[ERROR: Ollama server returned status {response.status_code}]"
+                return
+
+            for line in response.iter_lines():
+                if line:
+                    chunk = json.loads(line.decode("utf-8"))
+                    token = chunk.get("response", "")
+                    yield token
+                    if chunk.get("done", False):
+                        break
+        except requests.exceptions.RequestException as e:
+            yield f"[ERROR: Failed to reach Ollama instance. Details: {e}]"
+
+# ========================================
+# FILE: .\backend\services\llm\prompt_builder.py
+# ========================================
+
+import json
+
+
+class PromptBuilder:
+
+    def build(self, question: str, intent: str, context: dict):
+
+        return f"""
+You are a senior software engineering assistant.
+
+Your job is to analyze codebase context and answer questions accurately.
+
+---
+
+USER QUESTION:
+{question}
+
+---
+
+INTENT:
+{intent}
+
+---
+
+CODE CONTEXT:
+{json.dumps(context, indent=2)}
+
+---
+
+INSTRUCTIONS:
+- Be precise
+- Use only provided context
+- If unsure, say "Not enough information in codebase"
+- Explain clearly like a senior engineer reviewing code
+
+---
+ANSWER:
+"""
+
+# ========================================
+# FILE: .\backend\services\reasoning\context_builder.py
+# ========================================
+
+from pathlib import Path
+
+from backend.services.reasoning.symbol_lookup_service import SymbolLookupService
+from backend.services.reasoning.source_loader import SourceLoader
+
+
+class ContextBuilder:
+
+    def __init__(self, index_path: Path):
+
+        self.lookup = SymbolLookupService(index_path)
+        self.loader = SourceLoader()
+
+    def build(self, symbol_name: str):
+
+        symbol = self.lookup.get_symbol(symbol_name)
+
+        if symbol is None:
+            return None
+
+        source = self.loader.get_source(
+            symbol["file"],
+            symbol["start_line"],
+            symbol["end_line"]
+        )
+
+        return {
+            "symbol": symbol,
+            "source": source
+        }
+
+# ========================================
+# FILE: .\backend\services\reasoning\source_loader.py
+# ========================================
+
+from pathlib import Path
+
+
+class SourceLoader:
+
+    def get_source(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int
+    ):
+
+        path = Path(file_path)
+
+        if not path.exists():
+            return ""
+
+        lines = path.read_text(
+            encoding="utf-8",
+            errors="ignore"
+        ).splitlines()
+
+        return "\n".join(
+            lines[start_line - 1:end_line]
+        )
+
+# ========================================
+# FILE: .\backend\services\reasoning\symbol_lookup_service.py
+# ========================================
+
+import json
+from pathlib import Path
+
+
+class SymbolLookupService:
+
+    def __init__(self, index_path: Path):
+        self.index_path = Path(index_path)
+        self.symbols = self._load_symbols()
+
+    def _load_symbols(self):
+        file = self.index_path / "symbols.json"
+
+        if not file.exists():
+            return []
+
+        return json.loads(file.read_text(encoding="utf-8"))
+
+    def get_symbol(self, symbol_name: str):
+
+        for symbol in self.symbols:
+
+            if symbol["name"] == symbol_name:
+                return symbol
+
+        return None
+
+# ========================================
+# FILE: .\backend\services\reasoning\__init__.py
+# ========================================
+
+
+
+# ========================================
+# FILE: .\backend\services\search\search_service.py
+# ========================================
+
+import json
+from pathlib import Path
+
+
+class SymbolSearchService:
+    def __init__(self, index_path: str):
+        self.index_path = Path(index_path)
+        self.symbols = self._load_symbols()
+
+    def _load_symbols(self):
+        symbols_file = self.index_path / "symbols.json"
+
+        if not symbols_file.exists():
+            return []
+
+        return json.loads(symbols_file.read_text(encoding="utf-8"))
+
+    def search(self, query: str):
+        query = query.lower().strip()
+
+        results = []
+
+        for sym in self.symbols:
+            name = sym.get("name", "").lower()
+            sym_type = sym.get("type", "").lower()
+
+            # MATCH RULES
+            if query in name:
+                results.append(sym)
+                continue
+
+            if query == sym_type:
+                results.append(sym)
+                continue
+
+        return {
+            "query": query,
+            "count": len(results),
+            "results": results
+        }
+
+    def search_by_type(self, symbol_type: str):
+        symbol_type = symbol_type.lower()
+
+        return [
+            s for s in self.symbols
+            if s.get("type", "").lower() == symbol_type
+        ]
+
+# ========================================
+# FILE: .\backend\utils\__init__.py
+# ========================================
+
