@@ -213,3 +213,62 @@ button:hover {
     line-height: 1.6;
 
 }
+
+.bubble {
+
+    position: relative;
+
+    line-height: 1.7;
+
+}
+
+.bubble pre {
+
+    overflow-x: auto;
+
+    padding: 15px;
+
+    border-radius: 8px;
+
+    margin-top: 15px;
+
+    margin-bottom: 15px;
+
+}
+
+.bubble code {
+
+    font-size: 14px;
+
+}
+
+.bubble table {
+
+    border-collapse: collapse;
+
+    margin-top: 15px;
+
+}
+
+.bubble td,
+.bubble th {
+
+    border: 1px solid #555;
+
+    padding: 8px;
+
+}
+
+.copy-button {
+
+    float: right;
+
+    margin-bottom: 10px;
+
+    font-size: 12px;
+
+    cursor: pointer;
+
+    padding: 5px 10px;
+
+}

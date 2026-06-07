@@ -6,122 +6,110 @@
 
     <meta charset="UTF-8">
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <title>IDM Dev Agent</title>
 
-    <link
-        rel="stylesheet"
-        href="/static/css/chat.css"
-    >
+    <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
 
 </head>
 
 <body>
 
-<div class="app">
+    <div class="app">
 
-    <header class="header">
+        <header class="header">
 
-        <div>
+            <div>
 
-            <h1>IDM Dev Agent</h1>
+                <h1>IDM Dev Agent</h1>
 
-            <p>
-                Local AI Coding Assistant
-            </p>
-
-        </div>
-
-    </header>
-
-    <main
-        id="chat-window"
-        class="chat-window"
-    >
-
-        <div class="assistant-message">
-
-            <div class="avatar">
-
-                🤖
+                <p>
+                    Local AI Coding Assistant
+                </p>
 
             </div>
 
-            <div class="bubble">
+        </header>
 
-                <h3>
+        <main id="chat-window" class="chat-window">
 
-                    Welcome
+            <div class="assistant-message">
 
-                </h3>
+                <div class="avatar">
 
-                <p>
+                    🤖
 
-                    Ask me anything about your project.
+                </div>
 
-                </p>
+                <div class="bubble">
 
-                <p>
+                    <h3>
 
-                    Examples:
+                        Welcome
 
-                </p>
+                    </h3>
 
-                <ul>
+                    <p>
 
-                    <li>
+                        Ask me anything about your project.
 
-                        Explain run_crawl
+                    </p>
 
-                    </li>
+                    <p>
 
-                    <li>
+                        Examples:
 
-                        Who calls run_crawl?
+                    </p>
 
-                    </li>
+                    <ul>
 
-                    <li>
+                        <li>
 
-                        Can I safely remove run_crawl?
+                            Explain run_crawl
 
-                    </li>
+                        </li>
 
-                </ul>
+                        <li>
+
+                            Who calls run_crawl?
+
+                        </li>
+
+                        <li>
+
+                            Can I safely remove run_crawl?
+
+                        </li>
+
+                    </ul>
+
+                </div>
 
             </div>
 
-        </div>
+        </main>
 
-    </main>
+        <footer class="footer">
 
-    <footer class="footer">
+            <textarea id="chat-input" placeholder="Ask about your project..."></textarea>
 
-        <textarea
+            <button id="send-button">
 
-            id="chat-input"
+                Send
 
-            placeholder="Ask about your project..."
+            </button>
 
-        ></textarea>
+        </footer>
 
-        <button
-            id="send-button"
-        >
+    </div>
 
-            Send
-
-        </button>
-
-    </footer>
-
-</div>
-
-<script src="/static/js/chat.js"></script>
+    <script src="/static/js/chat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="/static/js/chat.js"></script>
 
 </body>
 

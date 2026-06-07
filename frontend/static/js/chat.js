@@ -8,9 +8,10 @@ document.addEventListener("DOMContentLoaded", () => {
         chatWindow.scrollTop = chatWindow.scrollHeight;
     }
 
-    function createMessage(role, text) {
+    function addMessage(role, text) {
 
         const wrapper = document.createElement("div");
+
         wrapper.className =
             role === "user"
                 ? "user-message"
@@ -18,7 +19,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const avatar = document.createElement("div");
         avatar.className = "avatar";
-
         avatar.textContent =
             role === "user"
                 ? "👤"
@@ -27,7 +27,44 @@ document.addEventListener("DOMContentLoaded", () => {
         const bubble = document.createElement("div");
         bubble.className = "bubble";
 
-        bubble.textContent = text;
+        if (role === "assistant") {
+
+            bubble.innerHTML =
+                marked.parse(text);
+
+            bubble.querySelectorAll("pre code")
+                .forEach(block => {
+                    hljs.highlightElement(block);
+                });
+
+            const copyButton =
+                document.createElement("button");
+
+            copyButton.className = "copy-button";
+            copyButton.innerText = "Copy";
+
+            copyButton.onclick = () => {
+
+                navigator.clipboard.writeText(text);
+
+                copyButton.innerText = "Copied";
+
+                setTimeout(() => {
+
+                    copyButton.innerText = "Copy";
+
+                }, 1500);
+
+            };
+
+            bubble.prepend(copyButton);
+
+        }
+        else {
+
+            bubble.textContent = text;
+
+        }
 
         wrapper.appendChild(avatar);
         wrapper.appendChild(bubble);
@@ -37,56 +74,67 @@ document.addEventListener("DOMContentLoaded", () => {
         scrollBottom();
 
         return bubble;
+
     }
 
     async function sendMessage() {
 
         const message = input.value.trim();
 
-        if (message.length === 0)
+        if (!message)
             return;
 
-        createMessage(
-            "user",
-            message
-        );
+        addMessage("user", message);
 
         input.value = "";
 
-        const loadingBubble = createMessage(
-            "assistant",
-            "Thinking..."
-        );
+        const loading =
+            addMessage(
+                "assistant",
+                "Thinking..."
+            );
 
         try {
 
-            const response = await fetch(
-                "/agent/chat",
-                {
+            const response =
+                await fetch("/agent/chat", {
+
                     method: "POST",
+
                     headers: {
+
                         "Content-Type":
                             "application/json"
+
                     },
+
                     body: JSON.stringify({
-                        message: message
+
+                        message
+
                     })
-                }
-            );
 
-            const data = await response.json();
+                });
 
-            loadingBubble.textContent =
-                data.answer;
+            const data =
+                await response.json();
+
+            loading.innerHTML =
+                marked.parse(data.answer);
+
+            loading.querySelectorAll("pre code")
+                .forEach(block => {
+
+                    hljs.highlightElement(block);
+
+                });
 
         }
 
-        catch (err) {
+        catch {
 
-            loadingBubble.textContent =
-                "Error contacting agent.";
-
-            console.error(err);
+            loading.innerHTML =
+                "<b>Error contacting agent.</b>";
 
         }
 
@@ -94,27 +142,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
     }
 
-    button.addEventListener(
-        "click",
-        sendMessage
-    );
+    button.onclick = sendMessage;
 
     input.addEventListener(
         "keydown",
-        function (event) {
+        e => {
 
             if (
-                event.key === "Enter"
-                && !event.shiftKey
+                e.key === "Enter"
+                &&
+                !e.shiftKey
             ) {
 
-                event.preventDefault();
+                e.preventDefault();
 
                 sendMessage();
 
             }
 
         }
+
     );
 
 });
