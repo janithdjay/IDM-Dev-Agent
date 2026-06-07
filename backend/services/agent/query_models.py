@@ -12,5 +12,7 @@ class Intent(Enum):
     IMPACT_ANALYSIS = "impact_analysis"
 
     FIND_FILE = "find_file"
+    
+    DEPENDENCY_ANALYSIS = "dependency_analysis"
 
     UNKNOWN = "unknown"

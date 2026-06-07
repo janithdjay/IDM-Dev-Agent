@@ -61,43 +61,72 @@ Risks, coupling, performance concerns, or unclear logic.
 
     def _system_instructions(self) -> str:
         return """
-You are a senior software engineering assistant embedded inside a codebase analysis system.
+        You are a senior software engineering assistant embedded inside a codebase analysis system.
 
-Your job is to help developers debug, understand, and reason about a local codebase.
+        Your job is to help developers debug, understand, and reason about a local codebase.
 
-You do NOT behave like a chatbot.
+        You do NOT behave like a chatbot.
 
-You behave like a static analysis + reasoning engine.
-"""
+        You behave like a static analysis + reasoning engine.
+        """
 
     def _intent_prompt(self, intent: str) -> str:
         if intent == "explain_symbol":
             return """
-TASK:
-Explain the given symbol from the codebase.
+            TASK:
+            Explain the given symbol from the codebase.
 
-Focus:
-- What it does
-- Where it is used
-- What it interacts with
-"""
+            Focus:
+            - What it does
+            - Where it is used
+            - What it interacts with
+            """
 
         if intent == "find_callers":
             return """
-TASK:
-Find where this symbol is called in the system.
+            TASK:
+            Find where this symbol is called in the system.
 
-Focus:
-- Direct callers
-- Indirect callers (via wrappers)
-- Class / worker / async chains
-"""
+            Focus:
+            - Direct callers
+            - Indirect callers (via wrappers)
+            - Class / worker / async chains
+            """
 
         if intent == "unknown":
             return """
-TASK:
-Try to interpret developer intent using code context only.
-"""
+            TASK:
+            Try to interpret developer intent using code context only.
+            """
+
+        if intent == "impact_analysis":
+            return """
+            TASK:
+
+            Analyze the impact of modifying or deleting this symbol.
+
+            Focus:
+
+            - direct callers
+            - indirect callers
+            - related methods
+            - possible side effects
+            - refactoring risks
+            """
+
+        if intent == "dependency_analysis":
+            return """
+            TASK:
+
+            Analyze dependencies involving this symbol.
+
+            Focus:
+
+            - incoming dependencies
+            - outgoing dependencies
+            - coupling
+            - architecture implications
+            """
 
         return "TASK: General code analysis."
 
