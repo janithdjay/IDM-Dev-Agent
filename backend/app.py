@@ -2,7 +2,19 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from backend.routers import home, projects, index, search, graph, analysis, graph, ui, agent, agent_query, agent_execute
+from backend.routers import (
+    home,
+    projects,
+    index,
+    search,
+    graph,
+    analysis,
+    ui,
+    agent,
+    agent_query,
+    agent_execute,
+    agent_chat
+)
 
 app = FastAPI(
     title="IDM Dev Agent",
@@ -11,7 +23,9 @@ app = FastAPI(
 
 app.mount(
     "/static",
-    StaticFiles(directory="frontend/static"),
+    StaticFiles(
+        directory="frontend/static"
+    ),
     name="static"
 )
 
@@ -25,8 +39,14 @@ app.include_router(index.router)
 app.include_router(search.router)
 app.include_router(graph.router)
 app.include_router(analysis.router)
-app.include_router(graph.router)
 app.include_router(ui.router)
+
+# legacy/debug endpoints
+
 app.include_router(agent.router)
 app.include_router(agent_query.router)
 app.include_router(agent_execute.router)
+
+# new conversational endpoint
+
+app.include_router(agent_chat.router)
