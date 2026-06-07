@@ -27,12 +27,23 @@ class ExecutionEngine:
         start = time.perf_counter()
 
         # 1. Build cached context
-        cache_key = f"symbol:{symbol}"
+        cache_key = f"{intent}:{symbol}"
 
         context = self.cache.get(cache_key)
         if not context:
-            context = self.context_builder.build(symbol)
+            context = self.context_builder.build(
+                symbol_name=symbol,
+                intent=intent
+            )
             self.cache.set(cache_key, context)
+        print("=" * 60)
+        print("Intent:", intent)
+        print("Context keys:", list(context.keys()))
+        print(
+            "Context chars:",
+            len(str(context))
+        )
+        print("=" * 60)
 
         if not context:
             return {"error": "Symbol not found"}

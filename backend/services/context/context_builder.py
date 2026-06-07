@@ -21,64 +21,272 @@ class ContextBuilder:
         if not file.exists():
             return []
 
-        return json.loads(file.read_text(encoding="utf-8"))
+        return json.loads(
+            file.read_text(
+                encoding="utf-8"
+            )
+        )
 
-    # -----------------------------
-    # MAIN ENTRY POINT
-    # -----------------------------
+    # -----------------------------------
+    # PUBLIC ENTRY
+    # -----------------------------------
 
-    def build(self, symbol_name: str):
+    def build(
+        self,
+        symbol_name: str,
+        intent: str = None
+    ):
 
         symbol = self.name_index.get(symbol_name)
 
         if not symbol:
             return None
 
-        return {
-            "symbol": symbol["name"],
-            "type": symbol.get("type"),
-            "parent": symbol.get("parent"),
-            "file": symbol.get("file"),
-            "calls": symbol.get("calls", []),
+        if intent == "find_callers":
+            return self._build_find_callers(
+                symbol_name
+            )
 
-            "called_by": self._find_callers(symbol_name),
-            "related_symbols": self._find_related(symbol)
+        if intent == "impact_analysis":
+            return self._build_impact(
+                symbol
+            )
+
+        if intent == "dependency_analysis":
+            return self._build_dependency(
+                symbol
+            )
+
+        if intent == "explain_symbol":
+            return self._build_explain(
+                symbol
+            )
+
+        return self._build_default(
+            symbol
+        )
+
+    # -----------------------------------
+    # EXPLAIN
+    # -----------------------------------
+
+    def _build_explain(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get("type"),
+
+            "parent": symbol.get("parent"),
+
+            "file": symbol.get("file"),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "related_symbols":
+                self._find_related(symbol)
+
         }
 
-    # -----------------------------
-    # CALLERS (reverse lookup)
-    # -----------------------------
+    # -----------------------------------
+    # FIND CALLERS
+    # -----------------------------------
 
-    def _find_callers(self, symbol_name: str):
+    def _build_find_callers(
+        self,
+        symbol_name
+    ):
+
+        return {
+
+            "symbol": symbol_name,
+
+            "called_by":
+                self._find_callers(
+                    symbol_name
+                )
+
+        }
+
+    # -----------------------------------
+    # IMPACT
+    # -----------------------------------
+
+    def _build_impact(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get(
+                "type"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "called_by":
+                self._find_callers(
+                    symbol["name"]
+                ),
+
+            "related_symbols":
+                self._find_related(
+                    symbol
+                )
+
+        }
+
+    # -----------------------------------
+    # DEPENDENCY
+    # -----------------------------------
+
+    def _build_dependency(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            )
+
+        }
+
+    # -----------------------------------
+    # DEFAULT
+    # -----------------------------------
+
+    def _build_default(
+        self,
+        symbol
+    ):
+
+        return {
+
+            "symbol": symbol["name"],
+
+            "type": symbol.get(
+                "type"
+            ),
+
+            "parent": symbol.get(
+                "parent"
+            ),
+
+            "file": symbol.get(
+                "file"
+            ),
+
+            "calls": symbol.get(
+                "calls",
+                []
+            ),
+
+            "called_by":
+                self._find_callers(
+                    symbol["name"]
+                ),
+
+            "related_symbols":
+                self._find_related(
+                    symbol
+                )
+
+        }
+
+    # -----------------------------------
+    # REVERSE LOOKUP
+    # -----------------------------------
+
+    def _find_callers(
+        self,
+        symbol_name
+    ):
 
         callers = []
 
         for s in self.symbols:
 
-            if symbol_name in s.get("calls", []):
+            if symbol_name in s.get(
+                "calls",
+                []
+            ):
+
                 callers.append({
+
                     "name": s["name"],
-                    "type": s.get("type"),
-                    "parent": s.get("parent")
+
+                    "type": s.get(
+                        "type"
+                    ),
+
+                    "parent": s.get(
+                        "parent"
+                    )
+
                 })
 
         return callers
 
-    # -----------------------------
-    # RELATED SYMBOLS
-    # -----------------------------
+    # -----------------------------------
+    # RELATED
+    # -----------------------------------
 
-    def _find_related(self, symbol):
+    def _find_related(
+        self,
+        symbol
+    ):
 
         related = []
 
-        parent = symbol.get("parent")
+        parent = symbol.get(
+            "parent"
+        )
 
         if parent:
 
             for s in self.symbols:
 
-                if s.get("parent") == parent and s["name"] != symbol["name"]:
-                    related.append(f"{parent}.{s['name']}")
+                if (
+                    s.get("parent") == parent
+                    and s["name"] != symbol["name"]
+                ):
+
+                    related.append(
+                        f"{parent}.{s['name']}"
+                    )
 
         return related
