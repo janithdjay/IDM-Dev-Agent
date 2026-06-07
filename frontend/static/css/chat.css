@@ -169,3 +169,47 @@ button:hover {
     opacity: 0.9;
 
 }
+
+.user-message {
+
+    display: flex;
+
+    justify-content: flex-end;
+
+    margin-bottom: 20px;
+
+}
+
+.user-message .avatar {
+
+    order: 2;
+
+    margin-left: 15px;
+
+    margin-right: 0;
+
+}
+
+.user-message .bubble {
+
+    background: #0b5cff;
+
+    max-width: 900px;
+
+}
+
+.assistant-message {
+
+    display: flex;
+
+    margin-bottom: 20px;
+
+}
+
+.bubble {
+
+    white-space: pre-wrap;
+
+    line-height: 1.6;
+
+}
