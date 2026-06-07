@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "project_id": "idm",
+      "name": "IDM",
+      "root_path": "D:/Projects/IDM/idm-crawler",
+      "language": "python",
+      "active": true
+    }
+  ]
+}

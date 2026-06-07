@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Code Graph</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial;
+        }
+
+        svg {
+            width: 100vw;
+            height: 100vh;
+            background: #0f172a;
+        }
+
+        .node circle {
+            fill: #4CAF50;
+            stroke: white;
+            stroke-width: 1.5px;
+        }
+
+        .node text {
+            fill: white;
+            font-size: 12px;
+            pointer-events: none;
+        }
+
+        .link {
+            stroke: #94a3b8;
+            stroke-opacity: 0.6;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div style="
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 10;
+">
+        <input id="searchBox" placeholder="Search function/class..." style="padding:8px; width:250px;" />
+    </div>
+
+    <svg></svg>
+
+    <script>
+        let node, link;
+        async function loadGraph() {
+            const res = await fetch('/graph/data');
+            const data = await res.json();
+
+            const nodesMap = {};
+            const links = [];
+
+            // build nodes + links
+            for (const [source, targets] of Object.entries(data.calls)) {
+                nodesMap[source] = true;
+
+                for (const t of targets) {
+                    nodesMap[t] = true;
+                    links.push({ source, target: t });
+                }
+            }
+
+            const nodes = Object.keys(nodesMap).map(id => ({ id }));
+
+            const svg = d3.select("svg");
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            const simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links).id(d => d.id).distance(80))
+                .force("charge", d3.forceManyBody().strength(-200))
+                .force("center", d3.forceCenter(width / 2, height / 2));
+
+
+            link = svg.append("g")
+                .selectAll("line")
+                .data(links)
+                .enter()
+                .append("line")
+                .attr("class", "link");
+
+            node = svg.append("g")
+                .selectAll("g")
+                .data(nodes)
+                .enter()
+                .append("g")
+                .attr("class", "node")
+                .call(d3.drag()
+                    .on("start", dragstarted)
+                    .on("drag", dragged)
+                    .on("end", dragended)
+                );
+
+            node.append("circle")
+                .attr("r", 8)
+                .on("click", (event, d) => {
+                    alert(d.id);
+                });
+
+            node.append("text")
+                .attr("x", 10)
+                .attr("y", 3)
+                .text(d => d.id);
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node.attr("transform", d => `translate(${d.x},${d.y})`);
+            });
+
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        loadGraph();
+        document.getElementById("searchBox").addEventListener("input", function (e) {
+            const value = e.target.value.trim().toLowerCase();
+
+            node.style("opacity", d => {
+                if (!value) return 1;
+                return d.id.toLowerCase().includes(value) ? 1 : 0.1;
+            });
+
+            link.style("opacity", d => {
+                if (!value) return 1;
+                return (
+                    d.source.id.toLowerCase().includes(value) ||
+                    d.target.id.toLowerCase().includes(value)
+                ) ? 1 : 0.05;
+            });
+        });
+    </script>
+
+</body>
+
+</html>
