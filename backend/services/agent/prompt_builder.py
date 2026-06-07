@@ -115,12 +115,12 @@ Try to interpret developer intent using code context only.
         calls = symbol_data.get("calls", [])
         if calls:
             lines.append("\nDirect Calls:")
-            lines.append(", ".join(calls[:80]))  # prevent prompt explosion
+            lines.append(", ".join(calls[:20]))  # prevent prompt explosion
 
         related = symbol_data.get("related_symbols", [])
         if related:
             lines.append("\nRelated Symbols:")
-            lines.append(", ".join(related[:50]))
+            lines.append(", ".join(related[:10]))
 
         callers = symbol_data.get("called_by", [])
         if callers:
