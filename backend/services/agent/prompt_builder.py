@@ -127,5 +127,22 @@ Try to interpret developer intent using code context only.
             lines.append("\nCalled By:")
             for c in callers[:10]:
                 lines.append(f"- {c}")
+                
+        reasoning = symbol_data.get("reasoning", {})
+
+        if reasoning:
+            lines.append("\nCall Graph Reasoning:")
+
+            callers = reasoning.get("callers_chain", [])
+            if callers:
+                lines.append("\nCallers Chain:")
+                for c in callers[:10]:
+                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
+
+            callees = reasoning.get("callees_chain", [])
+            if callees:
+                lines.append("\nCallees Chain:")
+                for c in callees[:10]:
+                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
 
         return "\n".join(lines)
