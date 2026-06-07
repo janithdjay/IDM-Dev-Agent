@@ -27,9 +27,6 @@ class CallGraphService:
             for callee in calls:
                 graph[caller].append(callee)
                 reverse_graph[callee].append(caller)
-                
-        print("SYMBOLS:", len(self.symbols))
-        print("SAMPLE CALLS:", self.symbols[0].get("calls"))
 
         return {
             "calls": dict(graph),

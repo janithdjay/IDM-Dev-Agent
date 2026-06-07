@@ -4,7 +4,9 @@ from backend.services.agent.prompt_builder import PromptBuilder
 from backend.services.agent.reasoning_engine import ReasoningEngine
 from backend.services.graph.call_graph_service import CallGraphService
 from backend.services.cache.context_cache import ContextCache
+from backend.services.agent.context_compressor import ContextCompressor
 from config import INDEX_DIR
+import time
 
 
 class ExecutionEngine:
@@ -14,12 +16,15 @@ class ExecutionEngine:
         self.context_builder = ContextBuilder(INDEX_DIR / "idm")
         self.graph_service = CallGraphService(INDEX_DIR / "idm")
         self.prompt_builder = PromptBuilder()
-        self.llm = OllamaClient(model="qwen2.5-coder:7b")
+        # self.llm = OllamaClient(model="qwen2.5-coder:7b")
+        self.llm = OllamaClient(model="qwen2.5-coder:3b")
         self.reasoning_engine = ReasoningEngine(self.graph_service)
         self.cache = ContextCache(ttl_seconds=300)
+        self.compressor = ContextCompressor()
         
 
     def execute(self, intent: str, symbol: str, question: str = None):
+        start = time.perf_counter()
 
         # 1. Build cached context
         cache_key = f"symbol:{symbol}"
@@ -31,6 +36,9 @@ class ExecutionEngine:
 
         if not context:
             return {"error": "Symbol not found"}
+        
+        t1 = time.perf_counter()
+        print(f"Context: {t1 - start:.3f}s")
 
         reasoning_key = f"reasoning:{symbol}"
 
@@ -38,6 +46,9 @@ class ExecutionEngine:
         if not reasoning_context:
             reasoning_context = self.reasoning_engine.build_reasoning_context(symbol)
             self.cache.set(reasoning_key, reasoning_context)
+            
+        t2 = time.perf_counter()
+        print(f"Reasoning: {t2 - t1:.3f}s")
 
         context = {
             **context,
@@ -54,17 +65,34 @@ class ExecutionEngine:
             }
 
         # 3. LLM PATH
+        compressed_context = self.compressor.compress(
+            context=context,
+            intent=intent
+        )
+        
+        print("=" * 60)
         prompt = self.prompt_builder.build(
             intent=intent,
-            symbol_data=context,
+            symbol_data=compressed_context,
             question=question
         )
+        print("Prompt length:", len(prompt))
+        print("=" * 60)
+        
+        t3 = time.perf_counter()
+        print(f"Prompt: {t3 - t2:.3f}s")
 
         response = self.llm.generate(prompt)
+
+        t4 = time.perf_counter()
+
+        print(f"LLM: {t4 - t3:.3f}s")
+        print(f"TOTAL: {t4 - start:.3f}s")
+        print("=" * 60)
 
         return {
             "symbol": symbol,
             "intent": intent,
             "answer": response,
-            "context_used": context
+            "context_used": compressed_context
         }

@@ -19,7 +19,6 @@ class ProjectService:
         return self._projects_cache
 
     def get_project(self, project_id: str):
-        print("LOADED PROJECTS:", self._load_projects())
         projects = self._load_projects()
 
         for p in projects:

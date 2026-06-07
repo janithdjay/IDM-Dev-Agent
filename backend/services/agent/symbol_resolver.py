@@ -9,11 +9,6 @@ class SymbolResolver:
         self.index_path = Path(index_path)
 
         self.symbols = self._load_symbols()
-        
-        print("Loading symbols from:")
-        print(self.index_path)
-
-        print(self.index_path / "symbols.json")
 
     def _load_symbols(self):
 

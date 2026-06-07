@@ -14,5 +14,4 @@ def list_projects():
 
 @router.get("/{project_id}")
 def get_project(project_id: str):
-    print("DEBUG:", project_id)
     return project_service.get_project(project_id)

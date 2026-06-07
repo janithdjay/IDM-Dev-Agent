@@ -41,6 +41,5 @@ class EntityExtractor:
 
         if candidate is None:
             return None
-
-        print(f"Candidate extracted: {candidate}")
+        
         return self.resolver.resolve(candidate)
