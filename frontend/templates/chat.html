@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>IDM Dev Agent</title>
+
+    <link
+        rel="stylesheet"
+        href="/static/css/chat.css"
+    >
+
+</head>
+
+<body>
+
+<div class="app">
+
+    <header class="header">
+
+        <div>
+
+            <h1>IDM Dev Agent</h1>
+
+            <p>
+                Local AI Coding Assistant
+            </p>
+
+        </div>
+
+    </header>
+
+    <main
+        id="chat-window"
+        class="chat-window"
+    >
+
+        <div class="assistant-message">
+
+            <div class="avatar">
+
+                🤖
+
+            </div>
+
+            <div class="bubble">
+
+                <h3>
+
+                    Welcome
+
+                </h3>
+
+                <p>
+
+                    Ask me anything about your project.
+
+                </p>
+
+                <p>
+
+                    Examples:
+
+                </p>
+
+                <ul>
+
+                    <li>
+
+                        Explain run_crawl
+
+                    </li>
+
+                    <li>
+
+                        Who calls run_crawl?
+
+                    </li>
+
+                    <li>
+
+                        Can I safely remove run_crawl?
+
+                    </li>
+
+                </ul>
+
+            </div>
+
+        </div>
+
+    </main>
+
+    <footer class="footer">
+
+        <textarea
+
+            id="chat-input"
+
+            placeholder="Ask about your project..."
+
+        ></textarea>
+
+        <button
+            id="send-button"
+        >
+
+            Send
+
+        </button>
+
+    </footer>
+
+</div>
+
+<script src="/static/js/chat.js"></script>
+
+</body>
+
+</html>

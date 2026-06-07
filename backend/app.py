@@ -13,7 +13,8 @@ from backend.routers import (
     agent,
     agent_query,
     agent_execute,
-    agent_chat
+    agent_chat,
+    chat_ui
 )
 
 app = FastAPI(
@@ -41,12 +42,9 @@ app.include_router(graph.router)
 app.include_router(analysis.router)
 app.include_router(ui.router)
 
-# legacy/debug endpoints
-
 app.include_router(agent.router)
 app.include_router(agent_query.router)
 app.include_router(agent_execute.router)
-
-# new conversational endpoint
-
 app.include_router(agent_chat.router)
+
+app.include_router(chat_ui.router)
