@@ -1,30 +1,63 @@
 document.addEventListener("DOMContentLoaded", () => {
 
-    const chatWindow = document.getElementById("chat-window");
-    const input = document.getElementById("chat-input");
-    const button = document.getElementById("send-button");
+    const STORAGE_KEY = "idm_dev_agent_chat";
 
-    function scrollBottom() {
-        chatWindow.scrollTop = chatWindow.scrollHeight;
+    const chatWindow =
+        document.getElementById("chat-window");
+
+    const input =
+        document.getElementById("chat-input");
+
+    const button =
+        document.getElementById("send-button");
+
+    const newChatButton =
+        document.getElementById("new-chat-button");
+
+    let history = [];
+
+    function saveHistory() {
+
+        localStorage.setItem(
+
+            STORAGE_KEY,
+
+            JSON.stringify(history)
+
+        );
+
     }
 
-    function addMessage(role, text) {
+    function scrollBottom() {
 
-        const wrapper = document.createElement("div");
+        chatWindow.scrollTop =
+            chatWindow.scrollHeight;
+
+    }
+
+    function renderMessage(role, text) {
+
+        const wrapper =
+            document.createElement("div");
 
         wrapper.className =
             role === "user"
                 ? "user-message"
                 : "assistant-message";
 
-        const avatar = document.createElement("div");
+        const avatar =
+            document.createElement("div");
+
         avatar.className = "avatar";
+
         avatar.textContent =
             role === "user"
                 ? "👤"
                 : "🤖";
 
-        const bubble = document.createElement("div");
+        const bubble =
+            document.createElement("div");
+
         bubble.className = "bubble";
 
         if (role === "assistant") {
@@ -34,30 +67,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
             bubble.querySelectorAll("pre code")
                 .forEach(block => {
+
                     hljs.highlightElement(block);
+
                 });
 
-            const copyButton =
+            const copy =
                 document.createElement("button");
 
-            copyButton.className = "copy-button";
-            copyButton.innerText = "Copy";
+            copy.className =
+                "copy-button";
 
-            copyButton.onclick = () => {
+            copy.textContent = "Copy";
+
+            copy.onclick = () => {
 
                 navigator.clipboard.writeText(text);
 
-                copyButton.innerText = "Copied";
-
-                setTimeout(() => {
-
-                    copyButton.innerText = "Copy";
-
-                }, 1500);
-
             };
 
-            bubble.prepend(copyButton);
+            bubble.prepend(copy);
 
         }
         else {
@@ -67,91 +96,179 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         wrapper.appendChild(avatar);
+
         wrapper.appendChild(bubble);
 
         chatWindow.appendChild(wrapper);
 
         scrollBottom();
 
-        return bubble;
+    }
+
+    function redrawConversation() {
+
+        chatWindow.innerHTML = "";
+
+        if (history.length === 0) {
+
+            renderMessage(
+
+                "assistant",
+
+                "# Welcome\n\nAsk me anything about your project."
+
+            );
+
+            return;
+
+        }
+
+        history.forEach(msg => {
+
+            renderMessage(
+
+                msg.role,
+
+                msg.text
+
+            );
+
+        });
 
     }
 
     async function sendMessage() {
 
-        const message = input.value.trim();
+        const message =
+            input.value.trim();
 
         if (!message)
             return;
 
-        addMessage("user", message);
+        history.push({
+
+            role: "user",
+
+            text: message
+
+        });
+
+        saveHistory();
+
+        renderMessage(
+
+            "user",
+
+            message
+
+        );
 
         input.value = "";
 
-        const loading =
-            addMessage(
-                "assistant",
-                "Thinking..."
-            );
+        const loadingWrapper =
+            document.createElement("div");
+
+        loadingWrapper.className =
+            "assistant-message";
+
+        loadingWrapper.innerHTML =
+
+            '<div class="avatar">🤖</div><div class="bubble">Thinking...</div>';
+
+        chatWindow.appendChild(
+
+            loadingWrapper
+
+        );
+
+        scrollBottom();
 
         try {
 
             const response =
-                await fetch("/agent/chat", {
+                await fetch(
 
-                    method: "POST",
+                    "/agent/chat",
 
-                    headers: {
+                    {
 
-                        "Content-Type":
-                            "application/json"
+                        method: "POST",
 
-                    },
+                        headers: {
 
-                    body: JSON.stringify({
+                            "Content-Type":
 
-                        message
+                                "application/json"
 
-                    })
+                        },
 
-                });
+                        body: JSON.stringify({
+
+                            message
+
+                        })
+
+                    }
+
+                );
 
             const data =
                 await response.json();
 
-            loading.innerHTML =
-                marked.parse(data.answer);
+            loadingWrapper.remove();
 
-            loading.querySelectorAll("pre code")
-                .forEach(block => {
+            history.push({
 
-                    hljs.highlightElement(block);
+                role: "assistant",
 
-                });
+                text: data.answer
+
+            });
+
+            saveHistory();
+
+            renderMessage(
+
+                "assistant",
+
+                data.answer
+
+            );
 
         }
 
         catch {
 
-            loading.innerHTML =
-                "<b>Error contacting agent.</b>";
+            loadingWrapper.remove();
+
+            renderMessage(
+
+                "assistant",
+
+                "**Error contacting agent.**"
+
+            );
 
         }
-
-        scrollBottom();
 
     }
 
     button.onclick = sendMessage;
 
     input.addEventListener(
+
         "keydown",
+
         e => {
 
             if (
+
                 e.key === "Enter"
+
                 &&
+
                 !e.shiftKey
+
             ) {
 
                 e.preventDefault();
@@ -163,5 +280,41 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
     );
+
+    newChatButton.onclick = () => {
+
+        if (
+
+            confirm(
+
+                "Start a new conversation?"
+
+            )
+
+        ) {
+
+            history = [];
+
+            saveHistory();
+
+            redrawConversation();
+
+        }
+
+    };
+
+    const stored =
+        localStorage.getItem(
+            STORAGE_KEY
+        );
+
+    if (stored) {
+
+        history =
+            JSON.parse(stored);
+
+    }
+
+    redrawConversation();
 
 });

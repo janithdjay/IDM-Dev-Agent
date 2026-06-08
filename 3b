@@ -1,0 +1,15 @@
+## Summary
+`run_crawl` is a method within the `IDMEngine` class responsible for initiating the crawling process. It orchestrates various steps to gather and analyze data related to sites, including checking access rights, fetching metadata, and emitting events.
+
+## Analysis
+The `run_crawl` method performs several key actions:
+1. **Initialization**: Calls `now()` to get the current timestamp.
+2. **Telemetry Reset**: Resets telemetry statistics using `_reset_telemetry_stats()`.
+3. **Logging**: Logs various messages related to crawling operations.
+4. **Organization Service**: Retrieves and processes organization data using `OrgService`.
+5. **Access Check**: Determines if a site has access rights using `has_site_access()`.
+6. **Event Emission**: Emits events for different stages of the crawling process, such as starting and stopping.
+7. **Current Organizations**: Fetches current organizations using `get_current_orgs()`.
+8. **Plan Limits**: Retrieves plan limits using `get_plan_limits()`.
+9. **Organization by Site**: Retrieves an organization based on a site URL using `get_org_for_site()`.
+10. **Site Details**: Retrieves details about a specific site using `get()` and emits
