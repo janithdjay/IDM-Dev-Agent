@@ -9,7 +9,7 @@ class OllamaClient:
     def __init__(
         self,
         base_url="http://localhost:11434",
-        model="qwen2.5-coder:7b"
+        model="qwen2.5-coder:3b"
     ):
         self.base_url = base_url
         self.model = model
@@ -22,7 +22,7 @@ class OllamaClient:
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 250
+                "num_predict": 2048
             }
         }
 

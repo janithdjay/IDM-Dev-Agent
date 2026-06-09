@@ -105,5 +105,15 @@ class ExecutionEngine:
             "symbol": symbol,
             "intent": intent,
             "answer": response,
-            "context_used": compressed_context
+            "context_used": compressed_context,
+            "metrics": {
+                "context_ms": round((t1 - start) * 1000, 1),
+                "reasoning_ms": round((t2 - t1) * 1000, 1),
+                "prompt_ms": round((t3 - t2) * 1000, 1),
+                "llm_ms": round((t4 - t3) * 1000, 1),
+                "total_ms": round((t4 - start) * 1000, 1),
+                "context_chars": len(str(context)),
+                "prompt_chars": len(prompt),
+                "model": "qwen2.5-coder:3b"
+            }
         }

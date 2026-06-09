@@ -35,7 +35,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     }
 
-    function renderMessage(role, text) {
+    function renderMessage(role, text, metadata = null) {
 
         const wrapper =
             document.createElement("div");
@@ -82,11 +82,103 @@ document.addEventListener("DOMContentLoaded", () => {
 
             copy.onclick = () => {
 
-                navigator.clipboard.writeText(text);
+                navigator.clipboard.writeText(text).catch(console.error);
+
+                copy.textContent = "Copied!";
+
+                setTimeout(() => {
+
+                    copy.textContent = "Copy";
+
+                }, 1500);
 
             };
 
             bubble.prepend(copy);
+
+            if (metadata && metadata.metrics) {
+
+                const details =
+                    document.createElement("details");
+
+                details.className = "diagnostics";
+
+                const summary =
+                    document.createElement("summary");
+
+                summary.textContent =
+                    "Diagnostics";
+
+                details.appendChild(summary);
+
+                const table =
+                    document.createElement("table");
+
+                table.innerHTML = `
+
+                        <tr>
+
+                        <td class="metric-label">Intent</td>
+
+                        <td>${metadata.intent}</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">Resolved Symbol</td>
+
+                        <td>${metadata.symbol}</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">Context Size</td>
+
+                        <td>${metadata.metrics.context_chars} chars</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">Prompt Size</td>
+
+                        <td>${metadata.metrics.prompt_chars} chars</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">Model</td>
+
+                        <td>${metadata.metrics.model}</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">LLM Time</td>
+
+                        <td>${metadata.metrics.llm_ms} ms</td>
+
+                        </tr>
+
+                        <tr>
+
+                        <td class="metric-label">Total Time</td>
+
+                        <td>${metadata.metrics.total_ms} ms</td>
+
+                        </tr>
+
+                        `;
+
+                details.appendChild(table);
+
+                bubble.appendChild(details);
+
+            }
 
         }
         else {
@@ -129,7 +221,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 msg.role,
 
-                msg.text
+                msg.text,
+
+                msg.metadata || null
 
             );
 
@@ -221,25 +315,42 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 role: "assistant",
 
-                text: data.answer
+                text: data.answer,
+
+                metadata: {
+
+                    intent: data.intent,
+
+                    symbol: data.symbol,
+
+                    metrics: data.metrics
+
+                }
 
             });
 
             saveHistory();
 
             renderMessage(
-
                 "assistant",
-
-                data.answer
-
+                data.answer,
+                data
             );
 
         }
-
         catch {
 
             loadingWrapper.remove();
+
+            history.push({
+
+                role: "assistant",
+
+                text: "**Error contacting agent.**"
+
+            });
+
+            saveHistory();
 
             renderMessage(
 
@@ -310,8 +421,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (stored) {
 
-        history =
-            JSON.parse(stored);
+        try {
+            history = JSON.parse(stored);
+        }
+        catch {
+            history = [];
+        }
 
     }
 

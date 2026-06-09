@@ -51,15 +51,10 @@ class ChatEngine:
         )
 
         return {
-
             "question": question,
-
             "intent": result.get("intent"),
-
             "symbol": result.get("symbol"),
-
             "answer": result.get("answer"),
-
-            "context_used": result.get("context_used")
-
+            "context_used": result.get("context_used"),
+            "metrics": result.get("metrics")
         }

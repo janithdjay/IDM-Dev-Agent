@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 
@@ -29,12 +30,14 @@ class SymbolResolver:
         candidate = candidate.lower().strip()
 
         # Exact match
+
         for symbol in self.symbols:
 
             if symbol["name"].lower() == candidate:
                 return symbol["name"]
 
-        # Ignore spaces vs underscores
+        # Ignore spaces
+
         normalized = candidate.replace(" ", "_")
 
         for symbol in self.symbols:
@@ -42,12 +45,37 @@ class SymbolResolver:
             if symbol["name"].lower() == normalized:
                 return symbol["name"]
 
-        # Ignore underscores completely
+        # Ignore underscores
+
         normalized = normalized.replace("_", "")
 
         for symbol in self.symbols:
 
             if symbol["name"].lower().replace("_", "") == normalized:
                 return symbol["name"]
+
+        return None
+
+    def resolve_from_text(self, text: str):
+
+        """
+        Fallback scan.
+
+        Looks through every word in the sentence
+        and attempts to resolve it as a project symbol.
+        """
+
+        tokens = re.findall(
+            r"[A-Za-z_][A-Za-z0-9_]*",
+            text
+        )
+
+        for token in tokens:
+
+            resolved = self.resolve(token)
+
+            if resolved:
+
+                return resolved
 
         return None
