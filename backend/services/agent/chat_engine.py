@@ -1,6 +1,7 @@
 from backend.services.agent.intent_classifier import IntentClassifier
 from backend.services.agent.entity_extractor import EntityExtractor
 from backend.services.agent.execution_engine import ExecutionEngine
+from backend.services.llm.ollama_client import OllamaClient
 
 
 class ChatEngine:
@@ -12,6 +13,10 @@ class ChatEngine:
         self.entity_extractor = EntityExtractor()
 
         self.execution_engine = ExecutionEngine()
+
+        self.llm = OllamaClient(
+            model="qwen2.5-coder:3b"
+        )
 
     def chat(
         self,
@@ -26,19 +31,41 @@ class ChatEngine:
             question
         )
 
+        # ---------------------------------
+        # General software chat
+        # ---------------------------------
+
         if symbol is None:
+
+            prompt = f"""
+You are an expert software engineering assistant.
+
+Answer the following question clearly and concisely.
+
+Question:
+
+{question}
+"""
+
+            answer = self.llm.generate(
+                prompt
+            )
 
             return {
 
                 "question": question,
 
-                "intent": str(intent),
+                "intent": "general_chat",
 
                 "symbol": None,
 
-                "answer": "Unable to identify a code symbol from the question."
+                "answer": answer
 
             }
+
+        # ---------------------------------
+        # Project-aware execution
+        # ---------------------------------
 
         result = self.execution_engine.execute(
 
@@ -51,10 +78,17 @@ class ChatEngine:
         )
 
         return {
+
             "question": question,
+
             "intent": result.get("intent"),
+
             "symbol": result.get("symbol"),
+
             "answer": result.get("answer"),
+
             "context_used": result.get("context_used"),
+
             "metrics": result.get("metrics")
+
         }
