@@ -9,64 +9,110 @@ class IntentClassifier:
 
         q = question.lower().strip()
 
-        # -------------------
+        # -----------------------------------
         # Find Callers
-        # -------------------
+        # -----------------------------------
 
-        if re.search(r"where.*called", q):
-            return Intent.FIND_CALLERS
+        caller_patterns = [
 
-        if re.search(r"who.*calls", q):
-            return Intent.FIND_CALLERS
+            r"where.*called",
+            r"who.*calls",
+            r"called by",
+            r"find callers?",
+            r"show callers?",
+            r"list callers?"
 
-        if re.search(r"called by", q):
-            return Intent.FIND_CALLERS
+        ]
 
-        # -------------------
-        # Explain Symbol
-        # -------------------
+        for pattern in caller_patterns:
 
-        if re.search(r"what.*does", q):
-            return Intent.EXPLAIN_SYMBOL
+            if re.search(pattern, q):
 
-        if re.search(r"explain", q):
-            return Intent.EXPLAIN_SYMBOL
+                return Intent.FIND_CALLERS
 
-        if re.search(r"how.*works", q):
-            return Intent.EXPLAIN_SYMBOL
-
-        if re.search(r"how.*implemented", q):
-            return Intent.EXPLAIN_SYMBOL
-
-        # -------------------
-        # Impact Analysis
-        # -------------------
-
-        if re.search(r"can.*delete", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"safe.*remove", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"what.*depends", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"impact", q):
-            return Intent.IMPACT_ANALYSIS
-
-        # -------------------
+        # -----------------------------------
         # Dependency Analysis
-        # -------------------
+        # -----------------------------------
 
-        if re.search(r"uses", q):
-            return Intent.DEPENDENCY_ANALYSIS
+        dependency_patterns = [
 
-        if re.search(r"depends on", q):
-            return Intent.DEPENDENCY_ANALYSIS
+            r"depends on",
+            r"\buses\b",
+            r"\breferences\b",
+            r"what.*uses",
+            r"what.*references",
+            r"dependencies?",
+            r"external dependencies?"
 
-        if re.search(r"references", q):
-            return Intent.DEPENDENCY_ANALYSIS
+        ]
 
-        # -------------------
+        for pattern in dependency_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.DEPENDENCY_ANALYSIS
+
+        # -----------------------------------
+        # Impact Analysis
+        # -----------------------------------
+
+        impact_patterns = [
+
+            r"can.*delete",
+            r"safe.*remove",
+            r"safe.*delete",
+            r"should.*remove",
+            r"should.*delete",
+            r"can.*refactor",
+            r"safe.*modify",
+            r"what.*depends",
+            r"impact",
+            r"what.*break",
+            r"what happens if",
+            r"remove.*will",
+            r"delete.*will"
+
+        ]
+
+        for pattern in impact_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.IMPACT_ANALYSIS
+
+        # -----------------------------------
+        # Explain Symbol
+        # -----------------------------------
+
+        explain_patterns = [
+
+            r"what.*does",
+            r"explain",
+            r"describe",
+            r"summarize",
+            r"tell me about",
+            r"walk me through",
+            r"overview",
+            r"give me an overview",
+            r"how.*works",
+            r"how.*implemented",
+            r"how.*written",
+            r"how.*designed",
+            r"purpose of",
+            r"what is",
+            r"why.*exist",
+            r"why.*used"
+
+        ]
+
+        for pattern in explain_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.EXPLAIN_SYMBOL
+
+        # -----------------------------------
+        # Unknown
+        # -----------------------------------
 
         return Intent.UNKNOWN
