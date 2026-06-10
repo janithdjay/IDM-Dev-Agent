@@ -29,6 +29,15 @@ class ChatEngine:
         question: str
     ):
 
+        # ---------------------------------
+        # Store user message
+        # ---------------------------------
+
+        self.memory.remember(
+            role="user",
+            content=question
+        )
+
         intent = self.intent_classifier.classify(
             question
         )
@@ -37,19 +46,11 @@ class ChatEngine:
             question
         )
 
-        # ---------------------------------
-        # Explicit symbol always wins
-        # ---------------------------------
-
         if extracted_symbol:
 
             symbol = extracted_symbol
 
         else:
-
-            # ---------------------------------
-            # Use memory ONLY for references
-            # ---------------------------------
 
             if self.reference_resolver.should_use_memory(
                 question
@@ -61,23 +62,13 @@ class ChatEngine:
 
                 symbol = None
 
-        # ---------------------------------
-        # Debug logging
-        # ---------------------------------
-
         print("=" * 60)
         print("Question:", question)
-        print("Extracted Symbol:", extracted_symbol)
-        print("Memory Symbol:", self.memory.get_last_symbol())
-        print(
-            "Reference Detected:",
-            self.reference_resolver.should_use_memory(question)
-        )
         print("Resolved Symbol:", symbol)
         print("=" * 60)
 
         # ---------------------------------
-        # General software chat
+        # General chat
         # ---------------------------------
 
         if symbol is None:
@@ -85,14 +76,17 @@ class ChatEngine:
             prompt = f"""
 You are an expert software engineering assistant.
 
-Answer clearly and concisely.
-
 Question:
 
 {question}
 """
 
             answer = self.llm.generate(prompt)
+
+            self.memory.remember(
+                role="assistant",
+                content=answer
+            )
 
             return {
 
@@ -107,7 +101,7 @@ Question:
             }
 
         # ---------------------------------
-        # Execute project-aware request
+        # Project-aware execution
         # ---------------------------------
 
         result = self.execution_engine.execute(
@@ -116,27 +110,23 @@ Question:
 
             symbol=symbol,
 
-            question=question
+            question=question,
+
+            history=self.memory.get_recent_history()
 
         )
-
-        # ---------------------------------
-        # Update conversation memory
-        # ---------------------------------
 
         self.memory.remember(
+
+            role="assistant",
+
+            content=result.get("answer"),
+
             symbol=result.get("symbol"),
-            intent=result.get("intent"),
-            question=question,
-            answer=result.get("answer")
+
+            intent=result.get("intent")
+
         )
-        
-        print("=" * 60)
-        print("Conversation Memory Updated")
-        print("Last Symbol:", self.memory.get_last_symbol())
-        print("Last Intent:", self.memory.get_last_intent())
-        print("Last Question:", self.memory.get_last_question())
-        print("=" * 60)
 
         return {
 

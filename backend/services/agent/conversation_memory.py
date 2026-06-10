@@ -1,36 +1,41 @@
+from collections import deque
+
+
 class ConversationMemory:
 
-    def __init__(self):
+    def __init__(self, max_messages=20):
+
+        self.max_messages = max_messages
+
+        self.messages = deque(maxlen=max_messages)
 
         self.last_symbol = None
 
         self.last_intent = None
 
-        self.last_question = None
-
-        self.last_answer = None
-
     def remember(
-
         self,
-
-        symbol,
-
-        intent,
-
-        question=None,
-
-        answer=None
-
+        role: str,
+        content: str,
+        symbol=None,
+        intent=None
     ):
 
-        self.last_symbol = symbol
+        self.messages.append({
 
-        self.last_intent = intent
+            "role": role,
 
-        self.last_question = question
+            "content": content
 
-        self.last_answer = answer
+        })
+
+        if symbol:
+
+            self.last_symbol = symbol
+
+        if intent:
+
+            self.last_intent = intent
 
     def get_last_symbol(self):
 
@@ -40,20 +45,17 @@ class ConversationMemory:
 
         return self.last_intent
 
-    def get_last_question(self):
+    def get_recent_history(
+        self,
+        limit=6
+    ):
 
-        return self.last_question
-
-    def get_last_answer(self):
-
-        return self.last_answer
+        return list(self.messages)[-limit:]
 
     def clear(self):
+
+        self.messages.clear()
 
         self.last_symbol = None
 
         self.last_intent = None
-
-        self.last_question = None
-
-        self.last_answer = None

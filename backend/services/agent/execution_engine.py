@@ -23,19 +23,28 @@ class ExecutionEngine:
         self.compressor = ContextCompressor()
         
 
-    def execute(self, intent: str, symbol: str, question: str = None):
+    def execute(self, intent: str, symbol: str, question: str = None, history=None):
         start = time.perf_counter()
 
         # 1. Build cached context
         cache_key = f"{intent}:{symbol}"
 
         context = self.cache.get(cache_key)
-        if not context:
+
+        if context is None:
             context = self.context_builder.build(
                 symbol_name=symbol,
                 intent=intent
             )
-            self.cache.set(cache_key, context)
+
+            if context is not None:
+                self.cache.set(cache_key, context)
+
+        if context is None:
+            return {
+                "error": "Symbol not found"
+            }
+
         print("=" * 60)
         print("Intent:", intent)
         print("Context keys:", list(context.keys()))
@@ -44,9 +53,6 @@ class ExecutionEngine:
             len(str(context))
         )
         print("=" * 60)
-
-        if not context:
-            return {"error": "Symbol not found"}
         
         t1 = time.perf_counter()
         print(f"Context: {t1 - start:.3f}s")
@@ -81,13 +87,15 @@ class ExecutionEngine:
             intent=intent
         )
         
-        print("=" * 60)
         prompt = self.prompt_builder.build(
             intent=intent,
             symbol_data=compressed_context,
-            question=question
+            question=question,
+            history=history or []
         )
+        print("=" * 60)
         print("Prompt length:", len(prompt))
+        print("Compressed context chars:", len(str(compressed_context)))
         print("=" * 60)
         
         t3 = time.perf_counter()
