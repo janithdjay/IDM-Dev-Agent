@@ -46,3 +46,21 @@ class IndexService:
             "symbols": self.symbols,
             "imports": self.imports
         }
+        
+    def get_index(self):
+        """
+        Compatibility layer for analysis services.
+
+        Returns the internal index structure.
+        """
+
+        # Case 1: if index already stored
+        if hasattr(self, "index") and self.index:
+            return self.index
+
+        # Case 2: if build method exists
+        if hasattr(self, "build_index"):
+            return self.build_index()
+
+        # Case 3: fallback empty safe structure
+        return {}

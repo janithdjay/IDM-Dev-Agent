@@ -34,6 +34,54 @@ IGNORED_DIRECTORIES = [
 ]
 
 # ========================================
+# FILE: .\print_tree.py
+# ========================================
+
+# print_tree.py
+from pathlib import Path
+
+def print_directory_tree(root_dir: Path, current_dir: Path, prefix: str = "", ignore_dirs=None):
+    if ignore_dirs is None:
+        # Explicitly omit environments, caches, and raw data indexing paths
+        ignore_dirs = {
+            ".git", 
+            "__pycache__", 
+            "agent_env", 
+            "venv", 
+            ".venv", 
+            "node_modules", 
+            "data", 
+            "index", 
+            "index_data"
+        }
+        
+    try:
+        # Gather and sort files so folders appear cleanly structured
+        paths = sorted(list(current_dir.iterdir()), key=lambda p: (p.is_file(), p.name.lower()))
+    except PermissionError:
+        # Handle system folders or restricted files gracefully
+        return
+
+    for i, path in enumerate(paths):
+        if path.name in ignore_dirs:
+            continue
+            
+        is_last = (i == len(paths) - 1)
+        connector = "└── " if is_last else "├── "
+        
+        print(f"{prefix}{connector}{path.name}")
+        
+        # Recurse if the path is a directory
+        if path.is_dir():
+            new_prefix = prefix + ("    " if is_last else "│   ")
+            print_directory_tree(root_dir, path, new_prefix, ignore_dirs)
+
+if __name__ == "__main__":
+    project_root = Path(".")
+    print(f"\n📁 {project_root.resolve().name}/")
+    print_directory_tree(project_root, project_root)
+
+# ========================================
 # FILE: .\backend\app.py
 # ========================================
 
@@ -552,6 +600,15 @@ class ChatEngine:
         question: str
     ):
 
+        # ---------------------------------
+        # Store user message
+        # ---------------------------------
+
+        self.memory.remember(
+            role="user",
+            content=question
+        )
+
         intent = self.intent_classifier.classify(
             question
         )
@@ -560,19 +617,11 @@ class ChatEngine:
             question
         )
 
-        # ---------------------------------
-        # Explicit symbol always wins
-        # ---------------------------------
-
         if extracted_symbol:
 
             symbol = extracted_symbol
 
         else:
-
-            # ---------------------------------
-            # Use memory ONLY for references
-            # ---------------------------------
 
             if self.reference_resolver.should_use_memory(
                 question
@@ -584,23 +633,13 @@ class ChatEngine:
 
                 symbol = None
 
-        # ---------------------------------
-        # Debug logging
-        # ---------------------------------
-
         print("=" * 60)
         print("Question:", question)
-        print("Extracted Symbol:", extracted_symbol)
-        print("Memory Symbol:", self.memory.get_last_symbol())
-        print(
-            "Reference Detected:",
-            self.reference_resolver.should_use_memory(question)
-        )
         print("Resolved Symbol:", symbol)
         print("=" * 60)
 
         # ---------------------------------
-        # General software chat
+        # General chat
         # ---------------------------------
 
         if symbol is None:
@@ -608,14 +647,17 @@ class ChatEngine:
             prompt = f"""
 You are an expert software engineering assistant.
 
-Answer clearly and concisely.
-
 Question:
 
 {question}
 """
 
             answer = self.llm.generate(prompt)
+
+            self.memory.remember(
+                role="assistant",
+                content=answer
+            )
 
             return {
 
@@ -630,7 +672,7 @@ Question:
             }
 
         # ---------------------------------
-        # Execute project-aware request
+        # Project-aware execution
         # ---------------------------------
 
         result = self.execution_engine.execute(
@@ -639,27 +681,23 @@ Question:
 
             symbol=symbol,
 
-            question=question
+            question=question,
+
+            history=self.memory.get_recent_history()
 
         )
-
-        # ---------------------------------
-        # Update conversation memory
-        # ---------------------------------
 
         self.memory.remember(
+
+            role="assistant",
+
+            content=result.get("answer"),
+
             symbol=result.get("symbol"),
-            intent=result.get("intent"),
-            question=question,
-            answer=result.get("answer")
+
+            intent=result.get("intent")
+
         )
-        
-        print("=" * 60)
-        print("Conversation Memory Updated")
-        print("Last Symbol:", self.memory.get_last_symbol())
-        print("Last Intent:", self.memory.get_last_intent())
-        print("Last Question:", self.memory.get_last_question())
-        print("=" * 60)
 
         return {
 
@@ -712,39 +750,44 @@ class ContextCompressor:
 # FILE: .\backend\services\agent\conversation_memory.py
 # ========================================
 
+from collections import deque
+
+
 class ConversationMemory:
 
-    def __init__(self):
+    def __init__(self, max_messages=20):
+
+        self.max_messages = max_messages
+
+        self.messages = deque(maxlen=max_messages)
 
         self.last_symbol = None
 
         self.last_intent = None
 
-        self.last_question = None
-
-        self.last_answer = None
-
     def remember(
-
         self,
-
-        symbol,
-
-        intent,
-
-        question=None,
-
-        answer=None
-
+        role: str,
+        content: str,
+        symbol=None,
+        intent=None
     ):
 
-        self.last_symbol = symbol
+        self.messages.append({
 
-        self.last_intent = intent
+            "role": role,
 
-        self.last_question = question
+            "content": content
 
-        self.last_answer = answer
+        })
+
+        if symbol:
+
+            self.last_symbol = symbol
+
+        if intent:
+
+            self.last_intent = intent
 
     def get_last_symbol(self):
 
@@ -754,23 +797,20 @@ class ConversationMemory:
 
         return self.last_intent
 
-    def get_last_question(self):
+    def get_recent_history(
+        self,
+        limit=6
+    ):
 
-        return self.last_question
-
-    def get_last_answer(self):
-
-        return self.last_answer
+        return list(self.messages)[-limit:]
 
     def clear(self):
+
+        self.messages.clear()
 
         self.last_symbol = None
 
         self.last_intent = None
-
-        self.last_question = None
-
-        self.last_answer = None
 
 # ========================================
 # FILE: .\backend\services\agent\entity_extractor.py
@@ -871,19 +911,28 @@ class ExecutionEngine:
         self.compressor = ContextCompressor()
         
 
-    def execute(self, intent: str, symbol: str, question: str = None):
+    def execute(self, intent: str, symbol: str, question: str = None, history=None):
         start = time.perf_counter()
 
         # 1. Build cached context
         cache_key = f"{intent}:{symbol}"
 
         context = self.cache.get(cache_key)
-        if not context:
+
+        if context is None:
             context = self.context_builder.build(
                 symbol_name=symbol,
                 intent=intent
             )
-            self.cache.set(cache_key, context)
+
+            if context is not None:
+                self.cache.set(cache_key, context)
+
+        if context is None:
+            return {
+                "error": "Symbol not found"
+            }
+
         print("=" * 60)
         print("Intent:", intent)
         print("Context keys:", list(context.keys()))
@@ -892,9 +941,6 @@ class ExecutionEngine:
             len(str(context))
         )
         print("=" * 60)
-
-        if not context:
-            return {"error": "Symbol not found"}
         
         t1 = time.perf_counter()
         print(f"Context: {t1 - start:.3f}s")
@@ -929,13 +975,15 @@ class ExecutionEngine:
             intent=intent
         )
         
-        print("=" * 60)
         prompt = self.prompt_builder.build(
             intent=intent,
             symbol_data=compressed_context,
-            question=question
+            question=question,
+            history=history or []
         )
+        print("=" * 60)
         print("Prompt length:", len(prompt))
+        print("Compressed context chars:", len(str(compressed_context)))
         print("=" * 60)
         
         t3 = time.perf_counter()
@@ -1112,138 +1160,158 @@ class IntentClassifier:
 # ========================================
 
 from typing import Dict, Any, List
+from backend.services.agent.prompt_templates.registry import PromptRegistry
 
 
 class PromptBuilder:
     """
     Central prompt construction layer for the agent.
-    This ensures deterministic, structured, debug-focused outputs.
     """
 
     def __init__(self):
         pass
 
-    def build(self, intent: str, symbol_data: Dict[str, Any], question: str) -> str:
-        """
-        Build a structured prompt for the LLM.
-        """
+    def build(
+        self,
+        intent: str,
+        crawler_review_data: Dict[str, Any],
+        question: str,
+        history: List[Dict[str, str]] = None
+    ) -> str:
+
+        template = PromptRegistry.get(intent)
 
         base_instructions = self._system_instructions()
 
-        intent_prompt = self._intent_prompt(intent)
+        # ---------------------------
+        # TEMPLATE HANDLING (NEW CORE LOGIC)
+        # ---------------------------
 
-        context_block = self._build_context(symbol_data)
+        if template:
+            system_block = template.system()
+            task_block = template.task()
+            format_block = template.output_format()
+        else:
+            system_block = base_instructions
+            task_block = self._fallback_task(intent)
+            format_block = ""
+
+        history_block = self._build_history(history or [])
+
+        context_block = self._build_context(crawler_review_data)
 
         return f"""
-{base_instructions}
+{system_block}
 
-{intent_prompt}
+{task_block}
 
-# USER QUESTION
+{format_block}
+
+# RECENT CONVERSATION
+
+{history_block}
+
+# CURRENT USER QUESTION
+
 {question}
 
 # CODE CONTEXT
+
 {context_block}
 
-# INSTRUCTIONS
-- Be precise and technical
-- Focus only on the provided code context
-- Do not hallucinate functions or files not present
-- If something is unclear, say "unknown from context"
-- Keep response structured and concise
-# OUTPUT FORMAT
-Return your response in this exact structure:
+# IMPORTANT RULES
 
-## Summary
-Brief explanation of what the symbol does.
-
-## Analysis
-Detailed technical breakdown based only on provided context.
-
-## Key Observations
-Important behaviors, dependencies, or patterns.
-
-## Call Flow / Usage
-Where and how it is used in the system.
-
-## Potential Issues (if any)
-Risks, coupling, performance concerns, or unclear logic.
+- The recent conversation is additional context.
+- The current user question has highest priority.
+- Use the conversation history to resolve references like:
+    - it
+    - this
+    - that method
+    - summarize it
+    - explain further
+    - make it shorter
+- Never invent symbols.
+- Only use symbols present in the supplied context.
+- If uncertain, say "unknown from context".
 """
 
-    # -------------------------
+    # -------------------------------------------------
 
-    def _system_instructions(self) -> str:
+    def _system_instructions(self):
+
         return """
-        You are a senior software engineering assistant embedded inside a codebase analysis system.
+You are a senior software engineering assistant.
 
-        Your job is to help developers debug, understand, and reason about a local codebase.
+You help developers understand a local codebase.
 
-        You do NOT behave like a chatbot.
+You are a reasoning engine.
 
-        You behave like a static analysis + reasoning engine.
-        """
+You do not invent APIs or functions.
 
-    def _intent_prompt(self, intent: str) -> str:
-        if intent == "explain_symbol":
+You answer only from supplied context.
+"""
+
+    # -------------------------------------------------
+
+    def _fallback_task(self, intent: str):
+
+        if str(intent) == "explain_symbol":
+
+            return "TASK: Explain the requested symbol."
+
+        if str(intent) == "find_callers":
+
+            return "TASK: Identify callers and call chains."
+
+        if str(intent) == "impact_analysis":
+
             return """
-            TASK:
-            Explain the given symbol from the codebase.
+TASK: Assess modification or deletion impact.
+Include callers, dependencies, and risks.
+"""
 
-            Focus:
-            - What it does
-            - Where it is used
-            - What it interacts with
-            """
+        if str(intent) == "dependency_analysis":
 
-        if intent == "find_callers":
             return """
-            TASK:
-            Find where this symbol is called in the system.
+TASK: Analyze dependencies (incoming and outgoing).
+"""
 
-            Focus:
-            - Direct callers
-            - Indirect callers (via wrappers)
-            - Class / worker / async chains
-            """
-
-        if intent == "unknown":
+        if str(intent) == "codebase_review":
             return """
-            TASK:
-            Try to interpret developer intent using code context only.
-            """
-
-        if intent == "impact_analysis":
-            return """
-            TASK:
-
-            Analyze the impact of modifying or deleting this symbol.
-
-            Focus:
-
-            - direct callers
-            - indirect callers
-            - related methods
-            - possible side effects
-            - refactoring risks
-            """
-
-        if intent == "dependency_analysis":
-            return """
-            TASK:
-
-            Analyze dependencies involving this symbol.
-
-            Focus:
-
-            - incoming dependencies
-            - outgoing dependencies
-            - coupling
-            - architecture implications
-            """
+    TASK: Review codebase structure and suggest improvements.
+    Focus on architecture, design, and maintainability.
+    """
 
         return "TASK: General code analysis."
 
-    def _build_context(self, symbol_data: Dict[str, Any]) -> str:
+    # -------------------------------------------------
+
+    def _build_history(
+        self,
+        history
+    ):
+
+        if not history:
+            return "No previous conversation."
+
+        lines = []
+
+        for item in history:
+
+            role = item.get("role", "unknown")
+            content = item.get("content", "")
+
+            lines.append(f"{role.upper()}: {content}")
+
+        return "\n\n".join(lines)
+
+    # -------------------------------------------------
+
+    def _build_context(
+        self,
+        symbol_data
+    ):
+
         if not symbol_data:
             return "No symbol context found."
 
@@ -1257,7 +1325,7 @@ Risks, coupling, performance concerns, or unclear logic.
         calls = symbol_data.get("calls", [])
         if calls:
             lines.append("\nDirect Calls:")
-            lines.append(", ".join(calls[:20]))  # prevent prompt explosion
+            lines.append(", ".join(calls[:20]))
 
         related = symbol_data.get("related_symbols", [])
         if related:
@@ -1267,25 +1335,18 @@ Risks, coupling, performance concerns, or unclear logic.
         callers = symbol_data.get("called_by", [])
         if callers:
             lines.append("\nCalled By:")
-            for c in callers[:10]:
-                lines.append(f"- {c}")
-                
+            for caller in callers[:10]:
+                lines.append(str(caller))
+
         reasoning = symbol_data.get("reasoning", {})
-
         if reasoning:
-            lines.append("\nCall Graph Reasoning:")
+            lines.append("\nReasoning:")
 
-            callers = reasoning.get("callers_chain", [])
-            if callers:
-                lines.append("\nCallers Chain:")
-                for c in callers[:10]:
-                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
+            for item in reasoning.get("callers_chain", [])[:10]:
+                lines.append(f"{item['from']} -> {item['to']}")
 
-            callees = reasoning.get("callees_chain", [])
-            if callees:
-                lines.append("\nCallees Chain:")
-                for c in callees[:10]:
-                    lines.append(f"{c['from']} → {c['to']} (depth {c['depth']})")
+            for item in reasoning.get("callees_chain", [])[:10]:
+                lines.append(f"{item['from']} -> {item['to']}")
 
         return "\n".join(lines)
 
@@ -1537,6 +1598,284 @@ class SymbolResolver:
 # ========================================
 
 
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_templates\base.py
+# ========================================
+
+class BasePromptTemplate:
+    def system(self) -> str:
+        raise NotImplementedError
+
+    def task(self) -> str:
+        return ""
+
+    def output_format(self) -> str:
+        return ""
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_templates\codebase_review.py
+# ========================================
+
+from .base import BasePromptTemplate
+
+
+class CodebaseReviewTemplate(BasePromptTemplate):
+
+    def system(self):
+        return """
+You are a senior software architect and code reviewer.
+
+You analyze codebases for:
+- design issues
+- performance issues
+- coupling problems
+- missing abstractions
+- maintainability risks
+
+You are strict, practical, and opinionated.
+
+You do NOT invent code that is not in context.
+"""
+
+    def task(self):
+        return """
+TASK:
+
+Review the provided codebase context and suggest improvements.
+
+Focus on:
+
+1. Architecture issues
+2. Function/class design problems
+3. Unnecessary complexity
+4. Tight coupling or bad dependencies
+5. Missing abstractions
+6. Performance concerns
+7. Maintainability risks
+
+Be specific. Reference actual symbols from context.
+"""
+
+    def output_format(self):
+        return """
+## Summary
+
+## Architecture Observations
+
+## Code Quality Issues
+
+## Design Improvements
+
+## Refactoring Suggestions
+
+## Risk Assessment
+
+## Priority Fix List
+"""
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_templates\impact_analysis.py
+# ========================================
+
+from .base import BasePromptTemplate
+
+
+class ImpactAnalysisTemplate(BasePromptTemplate):
+
+    def system(self):
+        return """
+You are a senior software engineering assistant specialized in impact analysis.
+You analyze code change risks and dependency propagation.
+You never guess missing symbols.
+"""
+
+    def task(self):
+        return """
+TASK:
+
+Assess modification or deletion impact.
+
+Include:
+- direct callers
+- indirect callers
+- dependencies
+- refactoring risks
+"""
+
+    def output_format(self):
+        return """
+## Summary
+## Impact Scope
+## Dependency Breakdown
+## Risks
+## Recommendation
+"""
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_templates\registry.py
+# ========================================
+
+from backend.services.agent.prompt_templates.impact_analysis import ImpactAnalysisTemplate
+from backend.services.agent.prompt_templates.run_crawl import RunCrawlTemplate
+from backend.services.agent.prompt_templates.codebase_review import CodebaseReviewTemplate
+
+
+class PromptRegistry:
+
+    _registry = {
+        "impact_analysis": ImpactAnalysisTemplate(),
+        "run_crawl": RunCrawlTemplate(),
+
+        # NEW PRIMARY INTENT
+        "codebase_review": CodebaseReviewTemplate(),
+    }
+
+    @classmethod
+    def get(cls, intent: str):
+        return cls._registry.get(intent)
+
+# ========================================
+# FILE: .\backend\services\agent\prompt_templates\run_crawl.py
+# ========================================
+
+from .base import BasePromptTemplate
+
+
+class RunCrawlTemplate(BasePromptTemplate):
+
+    def system(self):
+        return """
+You are a system execution analysis assistant.
+You analyze crawl execution flows and data movement.
+"""
+
+    def task(self):
+        return """
+TASK:
+
+Explain crawl execution behavior and flow.
+"""
+
+    def output_format(self):
+        return """
+## Summary
+## Execution Flow
+## Data Movement
+## Bottlenecks
+"""
+
+# ========================================
+# FILE: .\backend\services\analysis\crawler_review_service.py
+# ========================================
+
+class CrawlerReviewService:
+    """
+    Converts indexed codebase into architecture insights.
+    """
+
+    def __init__(self, index_service, graph_service):
+        self.index_service = index_service
+        self.graph_service = graph_service
+
+    def build_review_context(self):
+        """
+        Main entry point for full crawler analysis.
+        """
+
+        index = self.index_service.get_index()
+
+        graph = self.graph_service.build_graph()
+
+        return {
+            "modules": self._extract_modules(index),
+            "symbols": self._extract_symbols(index),
+            "dependencies": self._extract_dependencies(graph),
+            "hotspots": self._find_hotspots(graph),
+            "architecture_summary": self._build_arch_summary(graph)
+        }
+
+    # -------------------------------------------------
+
+    def _extract_modules(self, index):
+
+        modules = set()
+
+        if not index:
+            return []
+
+        for value in index.values():
+
+            # CASE 1: value is list of symbol entries
+            if isinstance(value, list):
+
+                for item in value:
+
+                    if isinstance(item, dict):
+                        modules.add(item.get("module", "unknown"))
+
+                    elif isinstance(item, str):
+                        modules.add("unknown")
+
+            # CASE 2: value is dict (old expected format)
+            elif isinstance(value, dict):
+                modules.add(value.get("module", "unknown"))
+
+        return list(modules)
+
+    # -------------------------------------------------
+
+    def _extract_symbols(self, index):
+        return {
+            k: {
+                "type": v.get("type"),
+                "file": v.get("file"),
+                "calls": v.get("calls", []),
+                "called_by": v.get("called_by", [])
+            }
+            for k, v in index.items()
+        }
+
+    # -------------------------------------------------
+
+    def _extract_dependencies(self, graph):
+        return graph.get("calls", {})
+
+    # -------------------------------------------------
+
+    def _find_hotspots(self, graph):
+        """
+        Identify heavily connected nodes.
+        """
+        calls = graph.get("calls", {})
+
+        hotspots = []
+
+        for node, edges in calls.items():
+            if len(edges) > 5:
+                hotspots.append({
+                    "symbol": node,
+                    "fan_out": len(edges)
+                })
+
+        return sorted(
+            hotspots,
+            key=lambda x: x["fan_out"],
+            reverse=True
+        )
+
+    # -------------------------------------------------
+
+    def _build_arch_summary(self, graph):
+        calls = graph.get("calls", {})
+
+        total_edges = sum(len(v) for v in calls.values())
+
+        return {
+            "total_nodes": len(calls),
+            "total_edges": total_edges,
+            "avg_fan_out": total_edges / max(len(calls), 1)
+        }
 
 # ========================================
 # FILE: .\backend\services\analysis\impact_analysis_service.py
@@ -2052,6 +2391,24 @@ class IndexService:
             "symbols": self.symbols,
             "imports": self.imports
         }
+        
+    def get_index(self):
+        """
+        Compatibility layer for analysis services.
+
+        Returns the internal index structure.
+        """
+
+        # Case 1: if index already stored
+        if hasattr(self, "index") and self.index:
+            return self.index
+
+        # Case 2: if build method exists
+        if hasattr(self, "build_index"):
+            return self.build_index()
+
+        # Case 3: fallback empty safe structure
+        return {}
 
 # ========================================
 # FILE: .\backend\services\indexing\models.py
@@ -2623,3 +2980,106 @@ class SymbolSearchService:
 # FILE: .\backend\utils\__init__.py
 # ========================================
 
+
+
+# ========================================
+# FILE: .\scripts\test_crawler_review.py
+# ========================================
+
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from backend.services.indexing.index_service import IndexService
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.analysis.crawler_review_service import CrawlerReviewService
+
+
+def run_test():
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    # ✅ unified config
+    project_config = {
+        "project_id": "idm-dev-agent",
+        "root_path": project_root,
+        "name": "IDM-Dev-Agent",
+        "index_cache_enabled": False,
+        "language": "python"
+    }
+
+    # ----------------------------
+    # INDEX LAYER
+    # ----------------------------
+    index_service = IndexService(project_config)
+
+    # ----------------------------
+    # GRAPH LAYER (FIX HERE)
+    # ----------------------------
+    index_path = os.path.join(project_root, "backend", "services", "indexing")
+
+    graph_service = CallGraphService(index_path)
+
+    # ----------------------------
+    # REVIEW LAYER
+    # ----------------------------
+    review_service = CrawlerReviewService(
+        index_service=index_service,
+        graph_service=graph_service
+    )
+
+    result = review_service.build_review_context()
+
+    print("\n===== ARCHITECTURE SUMMARY =====\n")
+    print(result.get("architecture_summary"))
+
+    print("\n===== HOTSPOTS =====\n")
+    for h in result.get("hotspots", [])[:10]:
+        print(h)
+
+    print("\n===== MODULES =====\n")
+    print(result.get("modules")[:20])
+
+
+if __name__ == "__main__":
+    run_test()
+
+# ========================================
+# FILE: .\scripts\test_prompt_builder.py
+# ========================================
+
+from backend.services.agent.prompt_builder import PromptBuilder
+from backend.services.analysis.crawler_review_service import CrawlerReviewService
+from backend.services.indexing.index_service import IndexService
+from backend.services.graph.call_graph_service import CallGraphService
+
+
+def run_test():
+    index_service = IndexService()
+    graph_service = CallGraphService()
+
+    crawler = CrawlerReviewService(index_service, graph_service)
+    crawler_data = crawler.build_review_context()
+
+    builder = PromptBuilder()
+
+    prompt = builder.build(
+        intent="codebase_review",
+        symbol_data={
+            "symbol": "IDM-CODEBASE",
+            "type": "system",
+            "file": "ALL",
+            "parent": None,
+            "reasoning": crawler_data
+        },
+        question="Review the entire IDM crawler system and suggest improvements",
+        history=[]
+    )
+
+    print("\n================ PROMPT OUTPUT ================\n")
+    print(prompt)
+
+
+if __name__ == "__main__":
+    run_test()

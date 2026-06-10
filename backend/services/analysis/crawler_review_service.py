@@ -27,10 +27,30 @@ class CrawlerReviewService:
     # -------------------------------------------------
 
     def _extract_modules(self, index):
-        return list(set(
-            item.get("module", "unknown")
-            for item in index.values()
-        ))
+
+        modules = set()
+
+        if not index:
+            return []
+
+        for value in index.values():
+
+            # CASE 1: value is list of symbol entries
+            if isinstance(value, list):
+
+                for item in value:
+
+                    if isinstance(item, dict):
+                        modules.add(item.get("module", "unknown"))
+
+                    elif isinstance(item, str):
+                        modules.add("unknown")
+
+            # CASE 2: value is dict (old expected format)
+            elif isinstance(value, dict):
+                modules.add(value.get("module", "unknown"))
+
+        return list(modules)
 
     # -------------------------------------------------
 
