@@ -41,7 +41,20 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from backend.routers import home, projects, index, search, graph, analysis, graph, ui, agent, agent_query, agent_execute
+from backend.routers import (
+    home,
+    projects,
+    index,
+    search,
+    graph,
+    analysis,
+    ui,
+    agent,
+    agent_query,
+    agent_execute,
+    agent_chat,
+    chat_ui
+)
 
 app = FastAPI(
     title="IDM Dev Agent",
@@ -50,7 +63,9 @@ app = FastAPI(
 
 app.mount(
     "/static",
-    StaticFiles(directory="frontend/static"),
+    StaticFiles(
+        directory="frontend/static"
+    ),
     name="static"
 )
 
@@ -64,84 +79,14 @@ app.include_router(index.router)
 app.include_router(search.router)
 app.include_router(graph.router)
 app.include_router(analysis.router)
-app.include_router(graph.router)
 app.include_router(ui.router)
+
 app.include_router(agent.router)
 app.include_router(agent_query.router)
 app.include_router(agent_execute.router)
+app.include_router(agent_chat.router)
 
-# ========================================
-# FILE: .\backend\main.py
-# ========================================
-
-# .\backend\main.py
-import uvicorn
-from fastapi import FastAPI, Query
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
-
-# Import your existing pipeline modules
-from backend.services.agent.symbol_resolver import SymbolResolver
-from backend.services.context.context_builder import ContextBuilder
-from backend.services.agent.prompt_builder import PromptBuilder
-from backend.services.llm.ollama_client import OllamaClient
-
-app = FastAPI(title="IDM Dev Companion Agent")
-
-# Enable CORS so your web interface can talk to the backend hassle-free
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Restrict this to your specific frontend port later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize global shared services (Point this to your indexed data folder)
-INDEX_DIR = Path("./index_data") 
-resolver = SymbolResolver(INDEX_DIR)
-context_builder = ContextBuilder(INDEX_DIR)
-prompt_builder = PromptBuilder()
-llm_client = OllamaClient()
-
-@app.get("/api/chat/stream")
-async def chat_stream(
-    question: str = Query(..., description="The user's debugging or code question"),
-    detected_symbol: str = Query(None, description="Optional symbol parsed out by the agent UI")
-):
-    """
-    Endpoint that streams codebase-aware intelligence tokens directly to the UI.
-    """
-    def token_generator():
-        # 1. Map user query/symbol to the precise target in your indexing layer
-        target_symbol = resolver.resolve(detected_symbol or question)
-        
-        # 2. Build out technical context if a relevant symbol is uncovered
-        symbol_data = {}
-        intent = "unknown"
-        
-        if target_symbol:
-            # Fall back to general explanation/intent map for the prompt context
-            intent = "explain_symbol" 
-            symbol_data = context_builder.build(target_symbol, intent=intent)
-        
-        # 3. Compile the rigid, engineering-focused systemic prompt layout
-        full_prompt = prompt_builder.build(
-            intent=intent,
-            symbol_data=symbol_data,
-            question=question
-        )
-        
-        # 4. Stream tokens down the pipe to the web UI
-        for token in llm_client.generate_stream(full_prompt):
-            yield token
-
-    # text/event-stream or text/plain tells the browser to process text iteratively
-    return StreamingResponse(token_generator(), media_type="text/plain")
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+app.include_router(chat_ui.router)
 
 # ========================================
 # FILE: .\backend\models\__init__.py
@@ -208,6 +153,37 @@ async def stream_agent_response(
             yield token
 
     return StreamingResponse(token_generator(), media_type="text/plain")
+
+# ========================================
+# FILE: .\backend\routers\agent_chat.py
+# ========================================
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from backend.services.agent.chat_engine import ChatEngine
+
+router = APIRouter(
+    prefix="/agent",
+    tags=["Agent Chat"]
+)
+
+engine = ChatEngine()
+
+
+class ChatRequest(BaseModel):
+
+    message: str
+
+
+@router.post("/chat")
+def chat(
+    request: ChatRequest
+):
+
+    return engine.chat(
+        request.message
+    )
 
 # ========================================
 # FILE: .\backend\routers\agent_execute.py
@@ -281,6 +257,31 @@ service = ImpactAnalysisService(INDEX_DIR / "idm")
 @router.get("/impact/{symbol_name}")
 def impact(symbol_name: str, depth: int = 5):
     return service.analyze(symbol_name, depth)
+
+# ========================================
+# FILE: .\backend\routers\chat_ui.py
+# ========================================
+
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+from pathlib import Path
+
+router = APIRouter()
+
+
+@router.get(
+    "/chat",
+    response_class=HTMLResponse
+)
+def chat_ui():
+
+    html_path = Path(
+        "frontend/templates/chat.html"
+    )
+
+    return html_path.read_text(
+        encoding="utf-8"
+    )
 
 # ========================================
 # FILE: .\backend\routers\graph.py
@@ -517,6 +518,166 @@ class ProjectService:
 
 
 # ========================================
+# FILE: .\backend\services\agent\chat_engine.py
+# ========================================
+
+from backend.services.agent.intent_classifier import IntentClassifier
+from backend.services.agent.entity_extractor import EntityExtractor
+from backend.services.agent.execution_engine import ExecutionEngine
+from backend.services.agent.conversation_memory import ConversationMemory
+from backend.services.agent.reference_resolver import ReferenceResolver
+from backend.services.llm.ollama_client import OllamaClient
+
+
+class ChatEngine:
+
+    def __init__(self):
+
+        self.intent_classifier = IntentClassifier()
+
+        self.entity_extractor = EntityExtractor()
+
+        self.execution_engine = ExecutionEngine()
+
+        self.memory = ConversationMemory()
+
+        self.reference_resolver = ReferenceResolver()
+
+        self.llm = OllamaClient(
+            model="qwen2.5-coder:3b"
+        )
+
+    def chat(
+        self,
+        question: str
+    ):
+
+        intent = self.intent_classifier.classify(
+            question
+        )
+
+        extracted_symbol = self.entity_extractor.extract_symbol(
+            question
+        )
+
+        # ---------------------------------
+        # Explicit symbol always wins
+        # ---------------------------------
+
+        if extracted_symbol:
+
+            symbol = extracted_symbol
+
+        else:
+
+            # ---------------------------------
+            # Use memory ONLY for references
+            # ---------------------------------
+
+            if self.reference_resolver.should_use_memory(
+                question
+            ):
+
+                symbol = self.memory.get_last_symbol()
+
+            else:
+
+                symbol = None
+
+        # ---------------------------------
+        # Debug logging
+        # ---------------------------------
+
+        print("=" * 60)
+        print("Question:", question)
+        print("Extracted Symbol:", extracted_symbol)
+        print("Memory Symbol:", self.memory.get_last_symbol())
+        print(
+            "Reference Detected:",
+            self.reference_resolver.should_use_memory(question)
+        )
+        print("Resolved Symbol:", symbol)
+        print("=" * 60)
+
+        # ---------------------------------
+        # General software chat
+        # ---------------------------------
+
+        if symbol is None:
+
+            prompt = f"""
+You are an expert software engineering assistant.
+
+Answer clearly and concisely.
+
+Question:
+
+{question}
+"""
+
+            answer = self.llm.generate(prompt)
+
+            return {
+
+                "question": question,
+
+                "intent": "general_chat",
+
+                "symbol": None,
+
+                "answer": answer
+
+            }
+
+        # ---------------------------------
+        # Execute project-aware request
+        # ---------------------------------
+
+        result = self.execution_engine.execute(
+
+            intent=intent,
+
+            symbol=symbol,
+
+            question=question
+
+        )
+
+        # ---------------------------------
+        # Update conversation memory
+        # ---------------------------------
+
+        self.memory.remember(
+            symbol=result.get("symbol"),
+            intent=result.get("intent"),
+            question=question,
+            answer=result.get("answer")
+        )
+        
+        print("=" * 60)
+        print("Conversation Memory Updated")
+        print("Last Symbol:", self.memory.get_last_symbol())
+        print("Last Intent:", self.memory.get_last_intent())
+        print("Last Question:", self.memory.get_last_question())
+        print("=" * 60)
+
+        return {
+
+            "question": question,
+
+            "intent": result.get("intent"),
+
+            "symbol": result.get("symbol"),
+
+            "answer": result.get("answer"),
+
+            "context_used": result.get("context_used"),
+
+            "metrics": result.get("metrics")
+
+        }
+
+# ========================================
 # FILE: .\backend\services\agent\context_compressor.py
 # ========================================
 
@@ -548,6 +709,70 @@ class ContextCompressor:
         return compressed
 
 # ========================================
+# FILE: .\backend\services\agent\conversation_memory.py
+# ========================================
+
+class ConversationMemory:
+
+    def __init__(self):
+
+        self.last_symbol = None
+
+        self.last_intent = None
+
+        self.last_question = None
+
+        self.last_answer = None
+
+    def remember(
+
+        self,
+
+        symbol,
+
+        intent,
+
+        question=None,
+
+        answer=None
+
+    ):
+
+        self.last_symbol = symbol
+
+        self.last_intent = intent
+
+        self.last_question = question
+
+        self.last_answer = answer
+
+    def get_last_symbol(self):
+
+        return self.last_symbol
+
+    def get_last_intent(self):
+
+        return self.last_intent
+
+    def get_last_question(self):
+
+        return self.last_question
+
+    def get_last_answer(self):
+
+        return self.last_answer
+
+    def clear(self):
+
+        self.last_symbol = None
+
+        self.last_intent = None
+
+        self.last_question = None
+
+        self.last_answer = None
+
+# ========================================
 # FILE: .\backend\services\agent\entity_extractor.py
 # ========================================
 
@@ -565,17 +790,18 @@ class EntityExtractor:
             INDEX_DIR / "idm"
         )
 
-    def extract_symbol(self, question: str):
+    def extract_symbol(
+        self,
+        question: str
+    ):
 
         patterns = [
-
             r"where\s+is\s+([A-Za-z_][A-Za-z0-9_]*)\(?\)?\s+called",
             r"who\s+calls\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"explain\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"what\s+does\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"can\s+i\s+delete\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"safe\s+to\s+remove\s+([A-Za-z_][A-Za-z0-9_]*)"
-
         ]
 
         candidate = None
@@ -589,13 +815,32 @@ class EntityExtractor:
             )
 
             if match:
+
                 candidate = match.group(1)
+
                 break
 
-        if candidate is None:
-            return None
-        
-        return self.resolver.resolve(candidate)
+        # -------------------------
+        # Regex match succeeded
+        # -------------------------
+
+        if candidate:
+
+            resolved = self.resolver.resolve(
+                candidate
+            )
+
+            if resolved:
+
+                return resolved
+
+        # -------------------------
+        # Fallback scan
+        # -------------------------
+
+        return self.resolver.resolve_from_text(
+            question
+        )
 
 # ========================================
 # FILE: .\backend\services\agent\execution_engine.py
@@ -708,7 +953,17 @@ class ExecutionEngine:
             "symbol": symbol,
             "intent": intent,
             "answer": response,
-            "context_used": compressed_context
+            "context_used": compressed_context,
+            "metrics": {
+                "context_ms": round((t1 - start) * 1000, 1),
+                "reasoning_ms": round((t2 - t1) * 1000, 1),
+                "prompt_ms": round((t3 - t2) * 1000, 1),
+                "llm_ms": round((t4 - t3) * 1000, 1),
+                "total_ms": round((t4 - start) * 1000, 1),
+                "context_chars": len(str(context)),
+                "prompt_chars": len(prompt),
+                "model": "qwen2.5-coder:3b"
+            }
         }
 
 # ========================================
@@ -744,65 +999,111 @@ class IntentClassifier:
 
         q = question.lower().strip()
 
-        # -------------------
+        # -----------------------------------
         # Find Callers
-        # -------------------
+        # -----------------------------------
 
-        if re.search(r"where.*called", q):
-            return Intent.FIND_CALLERS
+        caller_patterns = [
 
-        if re.search(r"who.*calls", q):
-            return Intent.FIND_CALLERS
+            r"where.*called",
+            r"who.*calls",
+            r"called by",
+            r"find callers?",
+            r"show callers?",
+            r"list callers?"
 
-        if re.search(r"called by", q):
-            return Intent.FIND_CALLERS
+        ]
 
-        # -------------------
-        # Explain Symbol
-        # -------------------
+        for pattern in caller_patterns:
 
-        if re.search(r"what.*does", q):
-            return Intent.EXPLAIN_SYMBOL
+            if re.search(pattern, q):
 
-        if re.search(r"explain", q):
-            return Intent.EXPLAIN_SYMBOL
+                return Intent.FIND_CALLERS
 
-        if re.search(r"how.*works", q):
-            return Intent.EXPLAIN_SYMBOL
-
-        if re.search(r"how.*implemented", q):
-            return Intent.EXPLAIN_SYMBOL
-
-        # -------------------
-        # Impact Analysis
-        # -------------------
-
-        if re.search(r"can.*delete", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"safe.*remove", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"what.*depends", q):
-            return Intent.IMPACT_ANALYSIS
-
-        if re.search(r"impact", q):
-            return Intent.IMPACT_ANALYSIS
-
-        # -------------------
+        # -----------------------------------
         # Dependency Analysis
-        # -------------------
+        # -----------------------------------
 
-        if re.search(r"uses", q):
-            return Intent.DEPENDENCY_ANALYSIS
+        dependency_patterns = [
 
-        if re.search(r"depends on", q):
-            return Intent.DEPENDENCY_ANALYSIS
+            r"depends on",
+            r"\buses\b",
+            r"\breferences\b",
+            r"what.*uses",
+            r"what.*references",
+            r"dependencies?",
+            r"external dependencies?"
 
-        if re.search(r"references", q):
-            return Intent.DEPENDENCY_ANALYSIS
+        ]
 
-        # -------------------
+        for pattern in dependency_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.DEPENDENCY_ANALYSIS
+
+        # -----------------------------------
+        # Impact Analysis
+        # -----------------------------------
+
+        impact_patterns = [
+
+            r"can.*delete",
+            r"safe.*remove",
+            r"safe.*delete",
+            r"should.*remove",
+            r"should.*delete",
+            r"can.*refactor",
+            r"safe.*modify",
+            r"what.*depends",
+            r"impact",
+            r"what.*break",
+            r"what happens if",
+            r"remove.*will",
+            r"delete.*will"
+
+        ]
+
+        for pattern in impact_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.IMPACT_ANALYSIS
+
+        # -----------------------------------
+        # Explain Symbol
+        # -----------------------------------
+
+        explain_patterns = [
+
+            r"what.*does",
+            r"explain",
+            r"describe",
+            r"summarize",
+            r"tell me about",
+            r"walk me through",
+            r"overview",
+            r"give me an overview",
+            r"how.*works",
+            r"how.*implemented",
+            r"how.*written",
+            r"how.*designed",
+            r"purpose of",
+            r"what is",
+            r"why.*exist",
+            r"why.*used"
+
+        ]
+
+        for pattern in explain_patterns:
+
+            if re.search(pattern, q):
+
+                return Intent.EXPLAIN_SYMBOL
+
+        # -----------------------------------
+        # Unknown
+        # -----------------------------------
 
         return Intent.UNKNOWN
 
@@ -1104,10 +1405,53 @@ class ReasoningEngine:
         return result
 
 # ========================================
+# FILE: .\backend\services\agent\reference_resolver.py
+# ========================================
+
+import re
+
+
+class ReferenceResolver:
+
+    def __init__(self):
+
+        self.reference_patterns = [
+
+            r"\bit\b",
+            r"\bthis\b",
+            r"\bthat\b",
+            r"\bthis method\b",
+            r"\bthat method\b",
+            r"\bthis function\b",
+            r"\bthat function\b",
+            r"\bthis class\b",
+            r"\bthat class\b",
+            r"\bthe method\b",
+            r"\bthe function\b",
+            r"\bthe class\b"
+
+        ]
+
+    def should_use_memory(
+        self,
+        question: str
+    ):
+
+        q = question.lower()
+
+        for pattern in self.reference_patterns:
+
+            if re.search(pattern, q):
+                return True
+
+        return False
+
+# ========================================
 # FILE: .\backend\services\agent\symbol_resolver.py
 # ========================================
 
 import json
+import re
 from pathlib import Path
 
 
@@ -1138,12 +1482,14 @@ class SymbolResolver:
         candidate = candidate.lower().strip()
 
         # Exact match
+
         for symbol in self.symbols:
 
             if symbol["name"].lower() == candidate:
                 return symbol["name"]
 
-        # Ignore spaces vs underscores
+        # Ignore spaces
+
         normalized = candidate.replace(" ", "_")
 
         for symbol in self.symbols:
@@ -1151,13 +1497,38 @@ class SymbolResolver:
             if symbol["name"].lower() == normalized:
                 return symbol["name"]
 
-        # Ignore underscores completely
+        # Ignore underscores
+
         normalized = normalized.replace("_", "")
 
         for symbol in self.symbols:
 
             if symbol["name"].lower().replace("_", "") == normalized:
                 return symbol["name"]
+
+        return None
+
+    def resolve_from_text(self, text: str):
+
+        """
+        Fallback scan.
+
+        Looks through every word in the sentence
+        and attempts to resolve it as a project symbol.
+        """
+
+        tokens = re.findall(
+            r"[A-Za-z_][A-Za-z0-9_]*",
+            text
+        )
+
+        for token in tokens:
+
+            resolved = self.resolve(token)
+
+            if resolved:
+
+                return resolved
 
         return None
 
@@ -1986,7 +2357,7 @@ class OllamaClient:
     def __init__(
         self,
         base_url="http://localhost:11434",
-        model="qwen2.5-coder:7b"
+        model="qwen2.5-coder:3b"
     ):
         self.base_url = base_url
         self.model = model
@@ -1999,7 +2370,7 @@ class OllamaClient:
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 250
+                "num_predict": 2048
             }
         }
 
