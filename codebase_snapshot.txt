@@ -101,7 +101,9 @@ from backend.routers import (
     agent_query,
     agent_execute,
     agent_chat,
-    chat_ui
+    chat_ui,
+    task_board,
+    refactor
 )
 
 app = FastAPI(
@@ -135,6 +137,341 @@ app.include_router(agent_execute.router)
 app.include_router(agent_chat.router)
 
 app.include_router(chat_ui.router)
+app.include_router(task_board.router)
+app.include_router(refactor.router)
+
+# ========================================
+# FILE: .\backend\config\task_config.py
+# ========================================
+
+import json
+from pathlib import Path
+from typing import Dict, Any
+from dataclasses import dataclass, asdict
+
+
+@dataclass
+class TaskThresholds:
+    """Configuration for task generation thresholds"""
+    # Fan-out thresholds (function calls too many others)
+    fan_out_medium: int = 5
+    fan_out_high: int = 10
+    fan_out_critical: int = 20
+    
+    # Fan-in thresholds (function called by too many)
+    fan_in_medium: int = 5
+    fan_in_high: int = 10
+    fan_in_critical: int = 20
+    
+    # LLM task generation settings
+    llm_enabled: bool = True
+    llm_max_tasks: int = 10
+    llm_model: str = "qwen2.5-coder:3b"
+
+
+class TaskConfig:
+    """Configuration manager for task generation"""
+    
+    def __init__(self, project_id: str):
+        self.project_id = project_id
+        self.config_dir = Path("data/config")
+        self.config_file = self.config_dir / f"{project_id}_task_config.json"
+        self._ensure_dir()
+        self.thresholds = self._load()
+    
+    def _ensure_dir(self):
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _load(self) -> TaskThresholds:
+        """Load config from disk or create default"""
+        if self.config_file.exists():
+            try:
+                data = json.loads(self.config_file.read_text(encoding="utf-8"))
+                return TaskThresholds(**data)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+                return TaskThresholds()
+        return TaskThresholds()
+    
+    def save(self) -> None:
+        """Save config to disk"""
+        self.config_file.write_text(
+            json.dumps(asdict(self.thresholds), indent=2),
+            encoding="utf-8"
+        )
+    
+    def get(self) -> TaskThresholds:
+        """Get current thresholds"""
+        return self.thresholds
+    
+    def update(self, updates: Dict[str, int]) -> None:
+        """Update thresholds and save"""
+        for key, value in updates.items():
+            if hasattr(self.thresholds, key):
+                setattr(self.thresholds, key, value)
+        self.save()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API response"""
+        return asdict(self.thresholds)
+
+# ========================================
+# FILE: .\backend\models\refactor.py
+# ========================================
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+from enum import Enum
+
+
+class RefactorType(str, Enum):
+    ADD_PARAMETER = "add_parameter"
+    REMOVE_PARAMETER = "remove_parameter"
+    RENAME_FUNCTION = "rename_function"
+    EXTRACT_METHOD = "extract_method"
+    INLINE_FUNCTION = "inline_function"
+
+
+class ChangeType(str, Enum):
+    FUNCTION_DEFINITION = "function_definition"
+    CALLER_UPDATE = "caller_update"
+    IMPORT_UPDATE = "import_update"
+    CLASS_UPDATE = "class_update"
+
+
+@dataclass
+class Parameter:
+    name: str
+    type_hint: Optional[str] = None
+    default_value: Optional[str] = None
+    is_required: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "type_hint": self.type_hint,
+            "default_value": self.default_value,
+            "is_required": self.is_required
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Parameter":
+        return cls(
+            name=data["name"],
+            type_hint=data.get("type_hint"),
+            default_value=data.get("default_value"),
+            is_required=data.get("is_required", True)
+        )
+
+
+@dataclass
+class CallSite:
+    file_path: str
+    line_number: int
+    calling_function: str
+    arguments: List[str]
+    source_line: str
+    argument_count: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_path": self.file_path,
+            "line_number": self.line_number,
+            "calling_function": self.calling_function,
+            "arguments": self.arguments,
+            "source_line": self.source_line,
+            "argument_count": self.argument_count
+        }
+
+
+@dataclass
+class FunctionDetail:
+    name: str
+    file_path: str
+    line_start: int
+    line_end: int
+    source_code: str
+    parameters: List[Parameter]
+    return_type: Optional[str] = None
+    decorators: List[str] = field(default_factory=list)
+    is_async: bool = False
+    is_method: bool = False
+    class_name: Optional[str] = None
+    docstring: Optional[str] = None
+    callers: List[CallSite] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "file_path": self.file_path,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "source_code": self.source_code,
+            "parameters": [p.to_dict() for p in self.parameters],
+            "return_type": self.return_type,
+            "decorators": self.decorators,
+            "is_async": self.is_async,
+            "is_method": self.is_method,
+            "class_name": self.class_name,
+            "docstring": self.docstring,
+            "callers": [c.to_dict() for c in self.callers]
+        }
+
+
+@dataclass
+class FileChange:
+    file_path: str
+    line_start: int
+    line_end: int
+    before: str
+    after: str
+    change_type: ChangeType
+    description: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_path": self.file_path,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "before": self.before,
+            "after": self.after,
+            "change_type": self.change_type.value,
+            "description": self.description
+        }
+
+
+@dataclass
+class RefactoringPlan:
+    id: str
+    target_function: str
+    refactor_type: RefactorType
+    changes: List[FileChange]
+    affected_files: List[str]
+    confidence: float
+    requires_review: bool
+    warning: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "target_function": self.target_function,
+            "refactor_type": self.refactor_type.value,
+            "changes": [c.to_dict() for c in self.changes],
+            "affected_files": self.affected_files,
+            "confidence": self.confidence,
+            "requires_review": self.requires_review,
+            "warning": self.warning
+        }
+        
+# Add is_public_api method to FunctionDetail
+def is_public_api(self) -> bool:
+    """Check if function is likely a public API"""
+    # Not starting with underscore (unless it's __init__ etc)
+    if self.name.startswith('_') and not self.name.startswith('__'):
+        return False
+    # Has docstring often indicates public API
+    if self.docstring:
+        return True
+    # Is a method without underscore prefix
+    return not self.name.startswith('_')
+
+FunctionDetail.is_public_api = is_public_api
+
+# ========================================
+# FILE: .\backend\models\task.py
+# ========================================
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional, List, Dict, Any
+
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    IGNORED = "ignored"
+    DEFERRED = "deferred"
+
+
+class TaskPriority(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class TaskCategory(str, Enum):
+    HIGH_COUPLING = "high_coupling"      # Fan-out: calls too many functions
+    HIGH_USAGE = "high_usage"             # Fan-in: called by too many
+    COMPLEXITY = "complexity"             # Too complex/long function
+    CIRCULAR_DEP = "circular_dependency"  # Circular import or call cycle
+    GOD_CLASS = "god_class"               # Class does too much
+    DEAD_CODE = "dead_code"               # No callers, no usage
+    MAINTAINABILITY = "maintainability"   # Code smell / tech debt (ADD THIS)
+    PERFORMANCE = "performance"           # Performance issues (ADD THIS)
+    SECURITY = "security"                 # Security vulnerabilities (ADD THIS)
+    RELIABILITY = "reliability"           # Reliability issues (ADD THIS)
+    ARCHITECTURE = "architecture"         # Architecture issues (ADD THIS)
+
+
+@dataclass
+class TaskEvidence:
+    """Evidence supporting a task recommendation"""
+    symbol: str
+    metric_type: str
+    metric_value: int
+    file_path: str
+    line_range: Optional[tuple] = None
+    callers: List[str] = field(default_factory=list)
+    callees: List[str] = field(default_factory=list)
+    source: str = "rule_based"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "metric_type": self.metric_type,
+            "metric_value": self.metric_value,
+            "file_path": self.file_path,
+            "line_range": self.line_range,
+            "callers": self.callers[:10],
+            "callees": self.callees[:10],
+            "source": self.source 
+        }
+
+
+@dataclass
+class AnalysisTask:
+    """A task generated by the AI review agent"""
+    id: str
+    title: str
+    description: str
+    category: TaskCategory
+    priority: TaskPriority
+    status: TaskStatus
+    evidence: List[TaskEvidence]
+    suggested_fix: Optional[str] = None
+    impact_analysis: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    notes: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "category": self.category.value,
+            "priority": self.priority.value,
+            "status": self.status.value,
+            "evidence": [e.to_dict() for e in self.evidence],
+            "suggested_fix": self.suggested_fix,
+            "impact_analysis": self.impact_analysis,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "notes": self.notes
+        }
 
 # ========================================
 # FILE: .\backend\models\__init__.py
@@ -150,18 +487,20 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from pathlib import Path
 
-# Explicit imports pointing to your provided components
-from backend.services.reasoning.context_builder import ContextBuilder as ReasoningContextBuilder
-from backend.services.llm.prompt_builder import PromptBuilder
+from backend.services.context.context_builder import ContextBuilder
+from backend.services.agent.prompt_builder import PromptBuilder
 from backend.services.llm.ollama_client import OllamaClient
+from backend.services.project_service import ProjectService
+from config import INDEX_DIR
 
 router = APIRouter(prefix="/api/agent", tags=["Agent"])
 
-# Path pointing to where your serialized index files live
-INDEX_PATH = Path("./index_data")
+# FIXED: Use consistent index path resolution
+project = ProjectService().get_active_project()
+INDEX_PATH = INDEX_DIR / project["project_id"]
 
-# Instantiate layout-aware operational services
-context_builder = ReasoningContextBuilder(INDEX_PATH)
+# Instantiate services
+context_builder = ContextBuilder(INDEX_PATH)
 prompt_builder = PromptBuilder()
 llm_client = OllamaClient()
 
@@ -178,25 +517,22 @@ async def stream_agent_response(
         context_data = None
         intent = "explain_symbol"
 
-        # Attempt structural reasoning lookups if a specific symbol is provided
         if symbol_name:
-            context_data = context_builder.build(symbol_name)
+            context_data = context_builder.build(symbol_name, intent="explain_symbol")
 
-        # Fallback context dictionary if symbol parsing yielded nothing
         if not context_data:
             intent = "general_query"
             context_data = {
                 "message": "No direct codebase symbol matches resolved for this request context."
             }
 
-        # Build prompt using your precise layout format
         full_prompt = prompt_builder.build(
-            question=question,
             intent=intent,
-            context=context_data
+            crawler_review_data=context_data,
+            question=question,
+            history=[]
         )
 
-        # Stream generated tokens out of Ollama to the client connection
         for token in llm_client.generate_stream(full_prompt):
             yield token
 
@@ -295,11 +631,12 @@ def classify(payload: dict):
 from fastapi import APIRouter
 
 from backend.services.analysis.impact_analysis_service import ImpactAnalysisService
+from backend.services.project_service import ProjectService
 from config import INDEX_DIR
 
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
-
-service = ImpactAnalysisService(INDEX_DIR / "idm")
+project = ProjectService().get_active_project()
+service = ImpactAnalysisService(INDEX_DIR / project["project_id"])
 
 
 @router.get("/impact/{symbol_name}")
@@ -338,11 +675,12 @@ def chat_ui():
 from fastapi import APIRouter
 
 from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.project_service import ProjectService
 from config import INDEX_DIR
 
 router = APIRouter(prefix="/graph", tags=["Graph"])
-
-service = CallGraphService(INDEX_DIR / "idm")
+project = ProjectService().get_active_project()
+service = CallGraphService(INDEX_DIR / project["project_id"])
 
 
 @router.get("/data")
@@ -412,6 +750,12 @@ def build_index(project_id: str):
 
     # 3. Build index
     result = index_service.build_index()
+    
+    # DEBUG: Print counts safely (removed problematic prints)
+    print(f"Index built for {project_id}")
+    print(f"  Files: {len(result.get('files', []))}")
+    print(f"  Symbols: {len(result.get('symbols', []))}")
+    print(f"  Imports: {len(result.get('imports', []))}")
 
     # 4. Save index
     manifest = serializer.save(project_id, result)
@@ -421,6 +765,7 @@ def build_index(project_id: str):
         "project_id": project_id,
         "manifest": manifest
     }
+
 
 @router.get("/status/{project_id}")
 def index_status(project_id: str):
@@ -462,17 +807,407 @@ def get_project(project_id: str):
     return project_service.get_project(project_id)
 
 # ========================================
+# FILE: .\backend\routers\refactor.py
+# ========================================
+
+# backend/routers/refactor.py
+
+from fastapi import APIRouter, HTTPException, Depends, status
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+
+from backend.models.refactor import (
+    RefactorType, Parameter, RefactoringPlan, ChangeType
+)
+from backend.services.refactor.code_analyzer import CodeAnalyzer
+from backend.services.refactor.impact_scanner import ImpactScanner, ImpactLevel
+from backend.services.refactor.change_engine import ChangeEngine
+from backend.services.project_service import ProjectService
+
+router = APIRouter(prefix="/api/refactor", tags=["refactoring"])
+
+
+# Request/Response Models
+class ParameterRequest(BaseModel):
+    """Request model for parameter operations"""
+    name: str
+    type_hint: Optional[str] = None
+    default_value: Optional[str] = None
+    is_required: bool = True
+
+
+class AddParameterRequest(BaseModel):
+    """Request for adding a parameter"""
+    function_name: str
+    new_parameter: ParameterRequest
+    default_value: Optional[str] = None
+    position: Optional[int] = None
+
+
+class RemoveParameterRequest(BaseModel):
+    """Request for removing a parameter"""
+    function_name: str
+    parameter_name: str
+
+
+class RenameFunctionRequest(BaseModel):
+    """Request for renaming a function"""
+    function_name: str
+    new_name: str
+
+
+class RefactorPlanResponse(BaseModel):
+    """Response model for refactoring plan"""
+    id: str
+    target_function: str
+    refactor_type: str
+    changes: List[Dict[str, Any]]
+    affected_files: List[str]
+    confidence: float
+    requires_review: bool
+    warning: Optional[str] = None
+
+
+class ImpactAnalysisResponse(BaseModel):
+    """Response model for impact analysis"""
+    impact_level: str
+    affected_files: List[str]
+    total_callers: int
+    breaking_changes: bool
+    warnings: List[str]
+    suggestions: List[str]
+    complexity_score: float
+
+
+class FunctionDetailResponse(BaseModel):
+    """Response model for function details"""
+    name: str
+    file_path: str
+    line_start: int
+    line_end: int
+    parameters: List[Dict[str, Any]]
+    return_type: Optional[str]
+    decorators: List[str]
+    is_async: bool
+    is_method: bool
+    class_name: Optional[str]
+    docstring: Optional[str]
+    caller_count: int
+    source_code_preview: str
+
+
+def get_project_id() -> str:
+    """Get current project ID"""
+    project_service = ProjectService()
+    active_project = project_service.get_active_project()
+    if not active_project:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active project selected"
+        )
+    return active_project["project_id"]
+
+
+@router.get("/analyze/function/{function_name}", response_model=FunctionDetailResponse)
+async def analyze_function(
+    function_name: str,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Get detailed information about a function including parameters and callers.
+    """
+    analyzer = CodeAnalyzer(project_id)
+    func_detail = analyzer.get_function_detail(function_name)
+    
+    if not func_detail:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Function '{function_name}' not found"
+        )
+    
+    # Create preview (first 200 chars)
+    preview = func_detail.source_code[:200] + "..." if len(func_detail.source_code) > 200 else func_detail.source_code
+    
+    return FunctionDetailResponse(
+        name=func_detail.name,
+        file_path=func_detail.file_path,
+        line_start=func_detail.line_start,
+        line_end=func_detail.line_end,
+        parameters=[p.to_dict() for p in func_detail.parameters],
+        return_type=func_detail.return_type,
+        decorators=func_detail.decorators,
+        is_async=func_detail.is_async,
+        is_method=func_detail.is_method,
+        class_name=func_detail.class_name,
+        docstring=func_detail.docstring,
+        caller_count=len(func_detail.callers),
+        source_code_preview=preview
+    )
+
+
+@router.post("/impact/add-parameter", response_model=ImpactAnalysisResponse)
+async def analyze_add_parameter_impact(
+    request: AddParameterRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Analyze impact of adding a new parameter to a function.
+    """
+    scanner = ImpactScanner(project_id)
+    
+    new_param = Parameter(
+        name=request.new_parameter.name,
+        type_hint=request.new_parameter.type_hint,
+        default_value=request.new_parameter.default_value,
+        is_required=request.new_parameter.is_required
+    )
+    
+    impact = scanner.analyze_add_parameter(
+        request.function_name,
+        new_param,
+        request.default_value
+    )
+    
+    return ImpactAnalysisResponse(
+        impact_level=impact.impact_level.value,
+        affected_files=impact.affected_files,
+        total_callers=impact.total_callers,
+        breaking_changes=impact.breaking_changes,
+        warnings=impact.warnings,
+        suggestions=impact.suggestions,
+        complexity_score=impact.complexity_score
+    )
+
+
+@router.post("/impact/remove-parameter", response_model=ImpactAnalysisResponse)
+async def analyze_remove_parameter_impact(
+    request: RemoveParameterRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Analyze impact of removing a parameter from a function.
+    """
+    scanner = ImpactScanner(project_id)
+    
+    impact = scanner.analyze_remove_parameter(
+        request.function_name,
+        request.parameter_name
+    )
+    
+    return ImpactAnalysisResponse(
+        impact_level=impact.impact_level.value,
+        affected_files=impact.affected_files,
+        total_callers=impact.total_callers,
+        breaking_changes=impact.breaking_changes,
+        warnings=impact.warnings,
+        suggestions=impact.suggestions,
+        complexity_score=impact.complexity_score
+    )
+
+
+@router.post("/impact/rename-function", response_model=ImpactAnalysisResponse)
+async def analyze_rename_function_impact(
+    request: RenameFunctionRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Analyze impact of renaming a function.
+    """
+    scanner = ImpactScanner(project_id)
+    
+    impact = scanner.analyze_rename_function(
+        request.function_name,
+        request.new_name
+    )
+    
+    return ImpactAnalysisResponse(
+        impact_level=impact.impact_level.value,
+        affected_files=impact.affected_files,
+        total_callers=impact.total_callers,
+        breaking_changes=impact.breaking_changes,
+        warnings=impact.warnings,
+        suggestions=impact.suggestions,
+        complexity_score=impact.complexity_score
+    )
+
+
+@router.post("/plan/add-parameter", response_model=RefactorPlanResponse)
+async def generate_add_parameter_plan(
+    request: AddParameterRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Generate a refactoring plan for adding a parameter.
+    """
+    engine = ChangeEngine(project_id)
+    
+    new_param = Parameter(
+        name=request.new_parameter.name,
+        type_hint=request.new_parameter.type_hint,
+        default_value=request.new_parameter.default_value,
+        is_required=request.new_parameter.is_required
+    )
+    
+    plan = engine.generate_add_parameter(
+        request.function_name,
+        new_param,
+        request.default_value,
+        request.position
+    )
+    
+    return RefactorPlanResponse(
+        id=plan.id,
+        target_function=plan.target_function,
+        refactor_type=plan.refactor_type.value,
+        changes=[c.to_dict() for c in plan.changes],
+        affected_files=plan.affected_files,
+        confidence=plan.confidence,
+        requires_review=plan.requires_review,
+        warning=plan.warning
+    )
+
+
+@router.post("/plan/remove-parameter", response_model=RefactorPlanResponse)
+async def generate_remove_parameter_plan(
+    request: RemoveParameterRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Generate a refactoring plan for removing a parameter.
+    """
+    engine = ChangeEngine(project_id)
+    
+    plan = engine.generate_remove_parameter(
+        request.function_name,
+        request.parameter_name
+    )
+    
+    return RefactorPlanResponse(
+        id=plan.id,
+        target_function=plan.target_function,
+        refactor_type=plan.refactor_type.value,
+        changes=[c.to_dict() for c in plan.changes],
+        affected_files=plan.affected_files,
+        confidence=plan.confidence,
+        requires_review=plan.requires_review,
+        warning=plan.warning
+    )
+
+
+@router.post("/plan/rename-function", response_model=RefactorPlanResponse)
+async def generate_rename_function_plan(
+    request: RenameFunctionRequest,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Generate a refactoring plan for renaming a function.
+    """
+    engine = ChangeEngine(project_id)
+    
+    plan = engine.generate_rename_function(
+        request.function_name,
+        request.new_name
+    )
+    
+    return RefactorPlanResponse(
+        id=plan.id,
+        target_function=plan.target_function,
+        refactor_type=plan.refactor_type.value,
+        changes=[c.to_dict() for c in plan.changes],
+        affected_files=plan.affected_files,
+        confidence=plan.confidence,
+        requires_review=plan.requires_review,
+        warning=plan.warning
+    )
+
+
+@router.get("/search/functions")
+async def search_functions(
+    query: str,
+    limit: int = 20,
+    project_id: str = Depends(get_project_id)
+):
+    """
+    Search for functions by name.
+    """
+    analyzer = CodeAnalyzer(project_id)
+    symbols = analyzer._load_symbols()
+    
+    results = []
+    for sym in symbols:
+        if sym.get("type") in ["function", "method"]:
+            name = sym.get("name", "")
+            if query.lower() in name.lower():
+                results.append({
+                    "name": name,
+                    "file": sym.get("file", ""),
+                    "type": sym.get("type"),
+                    "parent": sym.get("parent")
+                })
+                if len(results) >= limit:
+                    break
+    
+    return {"functions": results, "total": len(results)}
+
+
+@router.get("/available-refactorings")
+async def get_available_refactorings():
+    """
+    Get list of available refactoring types.
+    """
+    return {
+        "refactorings": [
+            {
+                "type": "add_parameter",
+                "name": "Add Parameter",
+                "description": "Add a new parameter to a function",
+                "requires": ["function_name", "new_parameter"],
+                "breaking": "Can be non-breaking if default value provided"
+            },
+            {
+                "type": "remove_parameter",
+                "name": "Remove Parameter",
+                "description": "Remove an existing parameter from a function",
+                "requires": ["function_name", "parameter_name"],
+                "breaking": "Always breaking if parameter is used"
+            },
+            {
+                "type": "rename_function",
+                "name": "Rename Function",
+                "description": "Rename a function/method",
+                "requires": ["function_name", "new_name"],
+                "breaking": "Always breaking for callers"
+            },
+            {
+                "type": "extract_method",
+                "name": "Extract Method",
+                "description": "Extract code block into new method (coming soon)",
+                "requires": ["function_name", "start_line", "end_line"],
+                "breaking": "Non-breaking"
+            },
+            {
+                "type": "inline_function",
+                "name": "Inline Function",
+                "description": "Inline function calls (coming soon)",
+                "requires": ["function_name"],
+                "breaking": "Non-breaking"
+            }
+        ]
+    }
+
+# ========================================
 # FILE: .\backend\routers\search.py
 # ========================================
 
 from fastapi import APIRouter
 
+from backend.services.project_service import ProjectService
 from backend.services.search.search_service import SymbolSearchService
 from config import INDEX_DIR
 
 router = APIRouter(prefix="/search", tags=["Search"])
-
-search_service = SymbolSearchService(INDEX_DIR / "idm")
+project = ProjectService().get_active_project()
+search_service = SymbolSearchService(INDEX_DIR / project["project_id"])
 
 
 @router.get("/symbols")
@@ -483,6 +1218,473 @@ def search_symbols(q: str):
 @router.get("/symbols/type/{symbol_type}")
 def search_by_type(symbol_type: str):
     return search_service.search_by_type(symbol_type)
+
+# ========================================
+# FILE: .\backend\routers\task_board.py
+# ========================================
+
+from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from pathlib import Path
+
+from backend.services.project_service import ProjectService
+from backend.services.indexing.index_service import IndexService
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.analysis.crawler_review_service import CrawlerReviewService
+from backend.services.task.task_generator import TaskGenerator
+from backend.services.task.task_storage import TaskStorage
+from backend.services.llm.ollama_client import OllamaClient
+from backend.models.task import TaskStatus, TaskCategory, TaskPriority, AnalysisTask, TaskEvidence
+from backend.config.task_config import TaskConfig
+from backend.services.task.background_task_manager import BackgroundTaskManager
+from config import DATA_DIR, INDEX_DIR
+
+router = APIRouter(prefix="/api/task-board", tags=["Task Board"])
+
+bg_manager = BackgroundTaskManager()
+
+class TaskUpdateRequest(BaseModel):
+    status: str
+    notes: Optional[str] = None
+
+
+def _get_services():
+    """Helper to initialize services for current project"""
+    project = ProjectService().get_active_project()
+    project_id = project["project_id"]
+    index_path = INDEX_DIR / project_id
+
+    index_service = IndexService(project)
+    graph_service = CallGraphService(index_path)
+    crawler_service = CrawlerReviewService(index_service, graph_service)
+    task_storage = TaskStorage(project_id, DATA_DIR)
+    task_generator = TaskGenerator(crawler_service, graph_service, project_id)  # Added project_id
+
+    return {
+        "project": project,
+        "project_id": project_id,
+        "graph_service": graph_service,
+        "crawler_service": crawler_service,
+        "task_storage": task_storage,
+        "task_generator": task_generator
+    }
+
+
+@router.get("/tasks")
+def list_tasks(status: Optional[str] = None) -> List[dict]:
+    """List all tasks, optionally filtered by status"""
+    services = _get_services()
+    tasks = services["task_storage"].load_tasks()
+
+    if status:
+        tasks = [t for t in tasks if t["status"] == status]
+
+    return tasks
+
+
+@router.post("/tasks/generate")
+def generate_tasks() -> dict:
+    """Generate new tasks from current codebase analysis"""
+    services = _get_services()
+
+    new_tasks = services["task_generator"].generate_tasks()
+
+    existing_tasks = services["task_storage"].load_tasks()
+    existing_ids = {t["id"] for t in existing_tasks}
+
+    added = []
+    for task in new_tasks:
+        if task.id not in existing_ids:
+            existing_tasks.append(task.to_dict())
+            added.append(task.id)
+
+    # Convert dicts back to AnalysisTask objects
+    all_tasks = []
+    for t_dict in existing_tasks:
+        # Reconstruct evidence
+        evidence_objects = []
+        for e in t_dict.get("evidence", []):
+            evidence_objects.append(TaskEvidence(
+                symbol=e["symbol"],
+                metric_type=e["metric_type"],
+                metric_value=e["metric_value"],
+                file_path=e["file_path"],
+                line_range=e.get("line_range"),
+                callers=e.get("callers", []),
+                callees=e.get("callees", [])
+            ))
+        
+        all_tasks.append(AnalysisTask(
+            id=t_dict["id"],
+            title=t_dict["title"],
+            description=t_dict["description"],
+            category=TaskCategory(t_dict["category"]),
+            priority=TaskPriority(t_dict["priority"]),
+            status=TaskStatus(t_dict["status"]),
+            evidence=evidence_objects,
+            suggested_fix=t_dict.get("suggested_fix"),
+            impact_analysis=t_dict.get("impact_analysis"),
+            created_at=t_dict["created_at"],
+            updated_at=t_dict["updated_at"],
+            notes=t_dict.get("notes")
+        ))
+
+    services["task_storage"].save_tasks(all_tasks)
+
+    return {
+        "message": f"Generated {len(added)} new tasks",
+        "total_tasks": len(existing_tasks),
+        "new_task_ids": added
+    }
+
+
+@router.get("/tasks/{task_id}")
+def get_task(task_id: str) -> dict:
+    """Get a single task with full details"""
+    services = _get_services()
+    tasks = services["task_storage"].load_tasks()
+
+    for task in tasks:
+        if task["id"] == task_id:
+            return task
+
+    raise HTTPException(status_code=404, detail="Task not found")
+
+
+@router.patch("/tasks/{task_id}")
+def update_task(task_id: str, update: TaskUpdateRequest) -> dict:
+    """Update task status (done/ignored/deferred/in_progress)"""
+    services = _get_services()
+
+    try:
+        status = TaskStatus(update.status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {update.status}")
+
+    success = services["task_storage"].update_task_status(task_id, status, update.notes)
+
+    if not success:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {"message": "Task updated", "task_id": task_id, "status": update.status}
+
+
+@router.get("/tasks/{task_id}/explanation")
+def get_task_explanation(task_id: str) -> dict:
+    """Get AI-generated impact analysis for a task"""
+    services = _get_services()
+    tasks = services["task_storage"].load_tasks()
+
+    task = None
+    for t in tasks:
+        if t["id"] == task_id:
+            task = t
+            break
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    evidence = task.get("evidence", [])
+    if evidence:
+        symbol = evidence[0].get("symbol") if isinstance(evidence[0], dict) else evidence[0].symbol
+    else:
+        symbol = "unknown"
+
+    chain = services["graph_service"].get_call_chain(symbol, max_depth=2)
+
+    llm = OllamaClient()
+    prompt = f"""
+You are a senior software engineer. Analyze this task and provide impact analysis.
+
+TASK: {task.get('title')}
+DESCRIPTION: {task.get('description')}
+
+EVIDENCE:
+- Symbol: {symbol}
+- Metric: {evidence[0].get('metric_type') if evidence else 'N/A'}
+- Value: {evidence[0].get('metric_value') if evidence else 'N/A'}
+
+CALL CHAIN ANALYSIS:
+- Callers (incoming): {chain.get('callers', [])[:10]}
+- Callees (outgoing): {chain.get('callees', [])[:10]}
+
+Provide:
+1. RISK ASSESSMENT (High/Medium/Low)
+2. IMPACT SCOPE (which parts of system affected)
+3. RECOMMENDED APPROACH
+4. ESTIMATED EFFORT (S/M/L)
+"""
+
+    analysis = llm.generate(prompt)
+
+    return {
+        "task_id": task_id,
+        "impact_analysis": analysis,
+        "call_chain": chain
+    }
+
+
+@router.get("/summary")
+def get_summary() -> dict:
+    """Get task board summary statistics"""
+    services = _get_services()
+    tasks = services["task_storage"].load_tasks()
+
+    status_counts = {}
+    priority_counts = {}
+    category_counts = {}
+
+    for task in tasks:
+        status = task.get("status", "unknown")
+        priority = task.get("priority", "unknown")
+        category = task.get("category", "unknown")
+
+        status_counts[status] = status_counts.get(status, 0) + 1
+        priority_counts[priority] = priority_counts.get(priority, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    return {
+        "total_tasks": len(tasks),
+        "by_status": status_counts,
+        "by_priority": priority_counts,
+        "by_category": category_counts
+    }
+    
+@router.get("/ui", response_class=HTMLResponse)
+def task_board_ui():
+    """Serve the task board HTML interface"""
+    html_path = Path("frontend/templates/task_board.html")
+    if html_path.exists():
+        return html_path.read_text(encoding="utf-8")
+    return "<h1>Task Board UI not found</h1>"
+
+@router.get("/config")
+def get_config(project_id: str = None) -> dict:
+    """Get current task generation configuration"""
+    if not project_id:
+        project = ProjectService().get_active_project()
+        project_id = project["project_id"]
+    
+    config = TaskConfig(project_id)
+    return config.to_dict()
+
+
+@router.put("/config")
+def update_config(config_data: dict, project_id: str = None) -> dict:
+    """Update task generation configuration"""
+    if not project_id:
+        project = ProjectService().get_active_project()
+        project_id = project["project_id"]
+    
+    config = TaskConfig(project_id)
+    
+    # Filter only valid threshold keys
+    valid_keys = [
+        'fan_out_medium', 'fan_out_high', 'fan_out_critical',
+        'fan_in_medium', 'fan_in_high', 'fan_in_critical',
+        'llm_enabled', 'llm_max_tasks', 'llm_model'
+    ]
+    
+    updates = {k: v for k, v in config_data.items() if k in valid_keys}
+    config.update(updates)
+    
+    return config.to_dict()
+
+
+@router.post("/tasks/generate-with-config")
+def generate_tasks_with_config(include_llm: bool = True) -> dict:
+    """Generate tasks using current configuration"""
+    services = _get_services()
+    
+    # Recreate task generator with current config
+    from backend.services.task.task_generator import TaskGenerator
+    task_generator = TaskGenerator(
+        services["crawler_service"], 
+        services["graph_service"],
+        services["project_id"]
+    )
+    
+    new_tasks = task_generator.generate_tasks(include_llm=include_llm)
+    
+    existing_tasks = services["task_storage"].load_tasks()
+    existing_ids = {t["id"] for t in existing_tasks}
+    
+    # Keep existing tasks, add only new ones
+    for task in new_tasks:
+        if task.id not in existing_ids:
+            existing_tasks.append(task.to_dict())
+    
+    # Save all tasks
+    all_tasks = []
+    for t_dict in existing_tasks:
+        evidence_objects = []
+        for e in t_dict.get("evidence", []):
+            from backend.models.task import TaskEvidence
+            evidence_objects.append(TaskEvidence(
+                symbol=e["symbol"],
+                metric_type=e["metric_type"],
+                metric_value=e["metric_value"],
+                file_path=e["file_path"],
+                line_range=e.get("line_range"),
+                callers=e.get("callers", []),
+                callees=e.get("callees", [])
+            ))
+        
+        from backend.models.task import AnalysisTask, TaskCategory, TaskPriority
+        all_tasks.append(AnalysisTask(
+            id=t_dict["id"],
+            title=t_dict["title"],
+            description=t_dict["description"],
+            category=TaskCategory(t_dict["category"]),
+            priority=TaskPriority(t_dict["priority"]),
+            status=t_dict["status"],
+            evidence=evidence_objects,
+            suggested_fix=t_dict.get("suggested_fix"),
+            impact_analysis=t_dict.get("impact_analysis"),
+            created_at=t_dict["created_at"],
+            updated_at=t_dict["updated_at"],
+            notes=t_dict.get("notes")
+        ))
+    
+    services["task_storage"].save_tasks(all_tasks)
+    
+    rule_count = len([t for t in new_tasks if "task_coupling" in t.id or "task_usage" in t.id])
+    llm_count = len([t for t in new_tasks if "task_llm" in t.id])
+    
+    return {
+        "message": f"Generated {len(new_tasks)} new tasks",
+        "rule_based_tasks": rule_count,
+        "llm_discovered_tasks": llm_count,
+        "total_tasks": len(existing_tasks)
+    }
+    
+
+@router.post("/tasks/generate-async")
+def generate_tasks_async(include_llm: bool = True) -> dict:
+    """Start background task generation and return job ID"""
+    project = ProjectService().get_active_project()
+    project_id = project["project_id"]
+    
+    job_id = bg_manager.start_generation(project_id, include_llm)
+    
+    return {
+        "job_id": job_id,
+        "status": "started",
+        "message": "Task generation started in background. Check /tasks/generate-status/{job_id} for progress."
+    }
+
+
+@router.get("/tasks/generate-status/{job_id}")
+def get_generation_status(job_id: str) -> dict:
+    """Check status of background task generation"""
+    job = bg_manager.get_job_status(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "result": job.get("result"),
+        "error": job.get("error")
+    }
+
+
+@router.get("/tasks/generate-active")
+def get_active_jobs() -> dict:
+    """Get all active generation jobs"""
+    return {
+        "active_jobs": bg_manager.get_active_jobs()
+    }
+    
+    
+@router.post("/tasks/generate-ai-only")
+def generate_ai_only_tasks() -> dict:
+    """Generate ONLY AI-discovered tasks (no rule-based)"""
+    services = _get_services()
+    
+    # Create task generator with current config
+    from backend.services.task.task_generator import TaskGenerator
+    task_generator = TaskGenerator(
+        services["crawler_service"], 
+        services["graph_service"],
+        services["project_id"]
+    )
+    
+    # Generate only AI tasks
+    new_tasks = task_generator.generate_ai_only_tasks()
+    
+    # Load existing tasks
+    existing_tasks = services["task_storage"].load_tasks()
+    existing_ids = {t["id"] for t in existing_tasks}
+    
+    # Add only new AI tasks (don't regenerate rule-based)
+    added_count = 0
+    for task in new_tasks:
+        if task.id not in existing_ids:
+            existing_tasks.append(task.to_dict())
+            added_count += 1
+    
+    # Save all tasks
+    all_tasks = []
+    for t_dict in existing_tasks:
+        evidence_objects = []
+        for e in t_dict.get("evidence", []):
+            from backend.models.task import TaskEvidence
+            evidence_objects.append(TaskEvidence(
+                symbol=e["symbol"],
+                metric_type=e["metric_type"],
+                metric_value=e["metric_value"],
+                file_path=e["file_path"],
+                line_range=e.get("line_range"),
+                callers=e.get("callers", []),
+                callees=e.get("callees", []),
+                source=e.get("source", "rule_based")
+            ))
+        
+        from backend.models.task import AnalysisTask, TaskCategory, TaskPriority, TaskStatus
+        all_tasks.append(AnalysisTask(
+            id=t_dict["id"],
+            title=t_dict["title"],
+            description=t_dict["description"],
+            category=TaskCategory(t_dict["category"]),
+            priority=TaskPriority(t_dict["priority"]),
+            status=TaskStatus(t_dict["status"]) if isinstance(t_dict["status"], str) else t_dict["status"],
+            evidence=evidence_objects,
+            suggested_fix=t_dict.get("suggested_fix"),
+            impact_analysis=t_dict.get("impact_analysis"),
+            created_at=t_dict["created_at"],
+            updated_at=t_dict["updated_at"],
+            notes=t_dict.get("notes")
+        ))
+    
+    services["task_storage"].save_tasks(all_tasks)
+    
+    return {
+        "message": f"Added {added_count} new AI-discovered tasks",
+        "ai_tasks_generated": len(new_tasks),
+        "ai_tasks_added": added_count,
+        "total_tasks": len(existing_tasks)
+    }
+
+
+@router.post("/tasks/generate-ai-only-async")
+def generate_ai_only_async() -> dict:
+    """Start background generation of ONLY AI-discovered tasks"""
+    project = ProjectService().get_active_project()
+    project_id = project["project_id"]
+    
+    job_id = bg_manager.start_ai_only_generation(project_id)
+    
+    return {
+        "job_id": job_id,
+        "status": "started",
+        "message": "AI-only task generation started in background. Results will be added to existing tasks."
+    }
 
 # ========================================
 # FILE: .\backend\routers\ui.py
@@ -520,8 +1722,16 @@ import json
 
 
 class ProjectService:
-    def __init__(self, projects_file: str):
-        self.projects_file = Path(projects_file)
+    def __init__(self, projects_file=None):
+        if projects_file is None:
+            self.projects_file = (
+                Path(__file__).resolve().parents[2]
+                / "data"
+                / "projects.json"
+            )
+        else:
+            self.projects_file = Path(projects_file)
+
         self._projects_cache = None
 
     def _load_projects(self):
@@ -546,6 +1756,25 @@ class ProjectService:
 
     def list_projects(self):
         return self._load_projects()
+    
+    def get_active_project(self):
+        projects = self._load_projects()
+
+        for project in projects:
+            if project.get("active", False):
+                return project
+
+        raise ValueError("No active project found in projects.json")
+    
+    def get_index_path_for_project(self, project_id: str = None) -> Path:
+        """Get the index path for a project"""
+        from config import INDEX_DIR
+        
+        if project_id is None:
+            project = self.get_active_project()
+            project_id = project["project_id"]
+        
+        return INDEX_DIR / project_id
 
 # ========================================
 # FILE: .\backend\services\search_service.py
@@ -818,6 +2047,7 @@ class ConversationMemory:
 
 import re
 
+from backend.services.project_service import ProjectService
 from config import INDEX_DIR
 from backend.services.agent.symbol_resolver import SymbolResolver
 
@@ -825,9 +2055,9 @@ from backend.services.agent.symbol_resolver import SymbolResolver
 class EntityExtractor:
 
     def __init__(self):
-
+        project = ProjectService().get_active_project()
         self.resolver = SymbolResolver(
-            INDEX_DIR / "idm"
+            INDEX_DIR / project["project_id"]
         )
 
     def extract_symbol(
@@ -893,6 +2123,7 @@ from backend.services.agent.reasoning_engine import ReasoningEngine
 from backend.services.graph.call_graph_service import CallGraphService
 from backend.services.cache.context_cache import ContextCache
 from backend.services.agent.context_compressor import ContextCompressor
+from backend.services.project_service import ProjectService
 from config import INDEX_DIR
 import time
 
@@ -900,9 +2131,9 @@ import time
 class ExecutionEngine:
 
     def __init__(self):
-
-        self.context_builder = ContextBuilder(INDEX_DIR / "idm")
-        self.graph_service = CallGraphService(INDEX_DIR / "idm")
+        project = ProjectService().get_active_project()
+        self.context_builder = ContextBuilder(INDEX_DIR / project["project_id"])
+        self.graph_service = CallGraphService(INDEX_DIR / project["project_id"])
         self.prompt_builder = PromptBuilder()
         # self.llm = OllamaClient(model="qwen2.5-coder:7b")
         self.llm = OllamaClient(model="qwen2.5-coder:3b")
@@ -1769,112 +3000,141 @@ Explain crawl execution behavior and flow.
 # FILE: .\backend\services\analysis\crawler_review_service.py
 # ========================================
 
-class CrawlerReviewService:
-    """
-    Converts indexed codebase into architecture insights.
-    """
+from pathlib import Path
+from typing import Dict, List, Any, Set
+from collections import defaultdict
 
+
+class CrawlerReviewService:
     def __init__(self, index_service, graph_service):
         self.index_service = index_service
         self.graph_service = graph_service
 
-    def build_review_context(self):
-        """
-        Main entry point for full crawler analysis.
-        """
-
+    def build_review_context(self) -> Dict[str, Any]:
         index = self.index_service.get_index()
-
         graph = self.graph_service.build_graph()
 
+        project_root = getattr(self.graph_service, 'index_path', None)
+        if project_root:
+            project_root = Path(project_root).parent.parent.parent
+        else:
+            project_root = Path.cwd()
+
         return {
-            "modules": self._extract_modules(index),
+            "modules": self._extract_modules(index, project_root),
             "symbols": self._extract_symbols(index),
             "dependencies": self._extract_dependencies(graph),
             "hotspots": self._find_hotspots(graph),
             "architecture_summary": self._build_arch_summary(graph)
         }
 
-    # -------------------------------------------------
+    def _extract_modules(self, index: Dict[str, Any], project_root: Path) -> List[str]:
+        symbols = index.get("symbols", [])
+        modules: Set[str] = set()
+        project_root = Path(project_root).resolve()
 
-    def _extract_modules(self, index):
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            file_path = item.get("file")
+            if not file_path:
+                continue
+            try:
+                absolute_path = Path(file_path).resolve()
+                try:
+                    relative = absolute_path.relative_to(project_root)
+                    module_parts = relative.with_suffix("").parts
+                    if module_parts:
+                        module = ".".join(module_parts)
+                        modules.add(module)
+                    else:
+                        modules.add(relative.stem)
+                except ValueError:
+                    modules.add(str(absolute_path.stem))
+            except Exception:
+                modules.add(Path(file_path).stem)
 
-        modules = set()
+        return sorted(modules)
 
-        if not index:
-            return []
+    def _extract_symbols(self, index: Dict[str, Any]) -> Dict[str, Any]:
+        symbols = index.get("symbols", [])
+        if not isinstance(symbols, list):
+            return {}
 
-        for value in index.values():
+        # Build called_by map
+        called_by_map = defaultdict(list)
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            caller = item.get("name")
+            for callee in item.get("calls", []):
+                if caller not in called_by_map[callee]:
+                    called_by_map[callee].append(caller)
 
-            # CASE 1: value is list of symbol entries
-            if isinstance(value, list):
-
-                for item in value:
-
-                    if isinstance(item, dict):
-                        modules.add(item.get("module", "unknown"))
-
-                    elif isinstance(item, str):
-                        modules.add("unknown")
-
-            # CASE 2: value is dict (old expected format)
-            elif isinstance(value, dict):
-                modules.add(value.get("module", "unknown"))
-
-        return list(modules)
-
-    # -------------------------------------------------
-
-    def _extract_symbols(self, index):
-        return {
-            k: {
-                "type": v.get("type"),
-                "file": v.get("file"),
-                "calls": v.get("calls", []),
-                "called_by": v.get("called_by", [])
+        result = {}
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name", "unknown")
+            result[name] = {
+                "type": item.get("type"),
+                "file": item.get("file"),
+                "calls": item.get("calls", []),
+                "called_by": called_by_map.get(name, [])
             }
-            for k, v in index.items()
-        }
 
-    # -------------------------------------------------
+        return result
 
-    def _extract_dependencies(self, graph):
+    def _extract_dependencies(self, graph: Dict[str, Any]) -> Dict[str, List[str]]:
         return graph.get("calls", {})
 
-    # -------------------------------------------------
-
-    def _find_hotspots(self, graph):
-        """
-        Identify heavily connected nodes.
-        """
+    def _find_hotspots(self, graph: Dict[str, Any]) -> List[Dict[str, Any]]:
         calls = graph.get("calls", {})
+        called_by = graph.get("called_by", {})
 
         hotspots = []
 
         for node, edges in calls.items():
-            if len(edges) > 5:
+            fan_out_count = len(edges)
+            if fan_out_count > 5:
                 hotspots.append({
                     "symbol": node,
-                    "fan_out": len(edges)
+                    "type": "fan_out",
+                    "metric_type": "high_coupling",
+                    "count": fan_out_count,
+                    "description": f"Calls {fan_out_count} other functions"
                 })
 
-        return sorted(
-            hotspots,
-            key=lambda x: x["fan_out"],
-            reverse=True
-        )
+        for node, callers in called_by.items():
+            fan_in_count = len(callers)
+            if fan_in_count > 5:
+                hotspots.append({
+                    "symbol": node,
+                    "type": "fan_in",
+                    "metric_type": "high_usage",
+                    "count": fan_in_count,
+                    "description": f"Called by {fan_in_count} other functions"
+                })
 
-    # -------------------------------------------------
+        return sorted(hotspots, key=lambda x: x["count"], reverse=True)
 
-    def _build_arch_summary(self, graph):
+    def _build_arch_summary(self, graph: Dict[str, Any]) -> Dict[str, Any]:
         calls = graph.get("calls", {})
+        called_by = graph.get("called_by", {})
 
+        total_nodes = len(calls)
         total_edges = sum(len(v) for v in calls.values())
+        all_nodes = set(calls.keys()) | set(called_by.keys())
+        connected_nodes = set(calls.keys()) | set(called_by.keys())
+        isolated = len(all_nodes) - len(connected_nodes)
 
         return {
-            "total_nodes": len(calls),
+            "total_nodes": total_nodes,
             "total_edges": total_edges,
-            "avg_fan_out": total_edges / max(len(calls), 1)
+            "avg_fan_out": total_edges / max(total_nodes, 1),
+            "max_fan_out": max((len(v) for v in calls.values()), default=0),
+            "max_fan_in": max((len(v) for v in called_by.values()), default=0),
+            "isolated_functions": isolated
         }
 
 # ========================================
@@ -1982,296 +3242,158 @@ class ContextCache:
 
 import json
 from pathlib import Path
+from typing import Dict, List, Any, Optional
 
 
 class ContextBuilder:
+    """
+    Unified context builder for symbol analysis.
+    Loads from index files and provides rich symbol context.
+    """
 
     def __init__(self, index_path: Path):
-
         self.index_path = Path(index_path)
-
         self.symbols = self._load_symbols()
+        self.name_index = {s["name"]: s for s in self.symbols}
+        self._callers_cache = None
 
-        self.name_index = {
-            s["name"]: s for s in self.symbols
-        }
-
-    def _load_symbols(self):
-
+    def _load_symbols(self) -> List[Dict[str, Any]]:
+        """Load symbols from index file"""
         file = self.index_path / "symbols.json"
-
         if not file.exists():
             return []
+        return json.loads(file.read_text(encoding="utf-8"))
 
-        return json.loads(
-            file.read_text(
-                encoding="utf-8"
-            )
-        )
+    def _build_callers_map(self) -> Dict[str, List[str]]:
+        """Build reverse mapping of callers for each symbol"""
+        if self._callers_cache is not None:
+            return self._callers_cache
 
-    # -----------------------------------
-    # PUBLIC ENTRY
-    # -----------------------------------
+        callers_map = {}
+        for s in self.symbols:
+            caller = s["name"]
+            for callee in s.get("calls", []):
+                if callee not in callers_map:
+                    callers_map[callee] = []
+                callers_map[callee].append(caller)
 
-    def build(
-        self,
-        symbol_name: str,
-        intent: str = None
-    ):
+        self._callers_cache = callers_map
+        return callers_map
 
+    def build(self, symbol_name: str, intent: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Build context for a symbol based on intent.
+        
+        Args:
+            symbol_name: Name of the symbol to analyze
+            intent: Optional intent to customize output (explain_symbol, find_callers, impact_analysis, dependency_analysis)
+        
+        Returns:
+            Dictionary with symbol context, or None if symbol not found
+        """
         symbol = self.name_index.get(symbol_name)
-
         if not symbol:
             return None
 
         if intent == "find_callers":
-            return self._build_find_callers(
-                symbol_name
-            )
+            return self._build_find_callers(symbol_name)
 
         if intent == "impact_analysis":
-            return self._build_impact(
-                symbol
-            )
+            return self._build_impact(symbol)
 
         if intent == "dependency_analysis":
-            return self._build_dependency(
-                symbol
-            )
+            return self._build_dependency(symbol)
 
-        if intent == "explain_symbol":
-            return self._build_explain(
-                symbol
-            )
-
-        return self._build_default(
-            symbol
-        )
+        # Default to explain_symbol
+        return self._build_explain(symbol)
 
     # -----------------------------------
-    # EXPLAIN
+    # BUILD METHODS
     # -----------------------------------
 
-    def _build_explain(
-        self,
-        symbol
-    ):
-
+    def _build_explain(self, symbol: Dict[str, Any]) -> Dict[str, Any]:
+        """Build context for symbol explanation"""
         return {
-
             "symbol": symbol["name"],
-
             "type": symbol.get("type"),
-
             "parent": symbol.get("parent"),
-
             "file": symbol.get("file"),
-
-            "calls": symbol.get(
-                "calls",
-                []
-            ),
-
-            "related_symbols":
-                self._find_related(symbol)
-
+            "calls": symbol.get("calls", []),
+            "called_by": self._find_callers(symbol["name"]),
+            "related_symbols": self._find_related(symbol)
         }
 
-    # -----------------------------------
-    # FIND CALLERS
-    # -----------------------------------
-
-    def _build_find_callers(
-        self,
-        symbol_name
-    ):
-
+    def _build_find_callers(self, symbol_name: str) -> Dict[str, Any]:
+        """Build context focused on callers"""
         return {
-
             "symbol": symbol_name,
-
-            "called_by":
-                self._find_callers(
-                    symbol_name
-                )
-
+            "called_by": self._find_callers(symbol_name)
         }
 
-    # -----------------------------------
-    # IMPACT
-    # -----------------------------------
-
-    def _build_impact(
-        self,
-        symbol
-    ):
-
+    def _build_impact(self, symbol: Dict[str, Any]) -> Dict[str, Any]:
+        """Build context for impact analysis"""
         return {
-
             "symbol": symbol["name"],
-
-            "type": symbol.get(
-                "type"
-            ),
-
-            "parent": symbol.get(
-                "parent"
-            ),
-
-            "file": symbol.get(
-                "file"
-            ),
-
-            "calls": symbol.get(
-                "calls",
-                []
-            ),
-
-            "called_by":
-                self._find_callers(
-                    symbol["name"]
-                ),
-
-            "related_symbols":
-                self._find_related(
-                    symbol
-                )
-
+            "type": symbol.get("type"),
+            "parent": symbol.get("parent"),
+            "file": symbol.get("file"),
+            "calls": symbol.get("calls", []),
+            "called_by": self._find_callers(symbol["name"]),
+            "related_symbols": self._find_related(symbol)
         }
 
-    # -----------------------------------
-    # DEPENDENCY
-    # -----------------------------------
-
-    def _build_dependency(
-        self,
-        symbol
-    ):
-
+    def _build_dependency(self, symbol: Dict[str, Any]) -> Dict[str, Any]:
+        """Build context for dependency analysis"""
         return {
-
             "symbol": symbol["name"],
-
-            "file": symbol.get(
-                "file"
-            ),
-
-            "parent": symbol.get(
-                "parent"
-            ),
-
-            "calls": symbol.get(
-                "calls",
-                []
-            )
-
+            "file": symbol.get("file"),
+            "parent": symbol.get("parent"),
+            "calls": symbol.get("calls", [])
         }
 
     # -----------------------------------
-    # DEFAULT
+    # HELPER METHODS
     # -----------------------------------
 
-    def _build_default(
-        self,
-        symbol
-    ):
-
-        return {
-
-            "symbol": symbol["name"],
-
-            "type": symbol.get(
-                "type"
-            ),
-
-            "parent": symbol.get(
-                "parent"
-            ),
-
-            "file": symbol.get(
-                "file"
-            ),
-
-            "calls": symbol.get(
-                "calls",
-                []
-            ),
-
-            "called_by":
-                self._find_callers(
-                    symbol["name"]
-                ),
-
-            "related_symbols":
-                self._find_related(
-                    symbol
-                )
-
-        }
-
-    # -----------------------------------
-    # REVERSE LOOKUP
-    # -----------------------------------
-
-    def _find_callers(
-        self,
-        symbol_name
-    ):
+    def _find_callers(self, symbol_name: str) -> List[Dict[str, Any]]:
+        """Find all symbols that call the given symbol"""
+        callers_map = self._build_callers_map()
+        caller_names = callers_map.get(symbol_name, [])
 
         callers = []
-
-        for s in self.symbols:
-
-            if symbol_name in s.get(
-                "calls",
-                []
-            ):
-
+        for name in caller_names:
+            s = self.name_index.get(name)
+            if s:
                 callers.append({
-
                     "name": s["name"],
-
-                    "type": s.get(
-                        "type"
-                    ),
-
-                    "parent": s.get(
-                        "parent"
-                    )
-
+                    "type": s.get("type"),
+                    "parent": s.get("parent")
                 })
 
         return callers
 
-    # -----------------------------------
-    # RELATED
-    # -----------------------------------
-
-    def _find_related(
-        self,
-        symbol
-    ):
-
+    def _find_related(self, symbol: Dict[str, Any]) -> List[str]:
+        """Find symbols related by parent class/scope"""
         related = []
-
-        parent = symbol.get(
-            "parent"
-        )
+        parent = symbol.get("parent")
 
         if parent:
-
             for s in self.symbols:
-
-                if (
-                    s.get("parent") == parent
-                    and s["name"] != symbol["name"]
-                ):
-
-                    related.append(
-                        f"{parent}.{s['name']}"
-                    )
+                if s.get("parent") == parent and s["name"] != symbol["name"]:
+                    related.append(f"{parent}.{s['name']}")
 
         return related
+
+    def get_symbol_source_location(self, symbol_name: str) -> Optional[Dict[str, Any]]:
+        """Get file and line information for a symbol"""
+        symbol = self.name_index.get(symbol_name)
+        if not symbol:
+            return None
+        return {
+            "file": symbol.get("file"),
+            "start_line": symbol.get("start_line"),
+            "end_line": symbol.get("end_line")
+        }
 
 # ========================================
 # FILE: .\backend\services\graph\call_graph_service.py
@@ -2280,64 +3402,201 @@ class ContextBuilder:
 import json
 from pathlib import Path
 from collections import defaultdict
+from typing import Dict, List, Any, Optional
 
 
 class CallGraphService:
+    """Service for building and querying call graphs from indexed symbols"""
+    
     def __init__(self, index_path: str):
         self.index_path = Path(index_path)
-        self.symbols = self._load_symbols()
+        self._symbols_cache = None
+        self._graph_cache = None
 
-    def _load_symbols(self):
+    def _load_symbols(self) -> List[Dict[str, Any]]:
+        """Load symbols from index file with caching"""
+        if self._symbols_cache is not None:
+            return self._symbols_cache
+
         file = self.index_path / "symbols.json"
-
         if not file.exists():
-            return []
+            print(f"[GraphService] symbols.json not found at: {file}")
+            self._symbols_cache = []
+            return self._symbols_cache
 
-        return json.loads(file.read_text(encoding="utf-8"))
+        self._symbols_cache = json.loads(file.read_text(encoding="utf-8"))
+        return self._symbols_cache
 
-    def build_graph(self):
+    def build_graph(self) -> Dict[str, Any]:
+        """
+        Build call graph from symbols.
+        Results are cached for performance.
+        """
+        if self._graph_cache is not None:
+            return self._graph_cache
+
+        symbols = self._load_symbols()
         graph = defaultdict(list)
         reverse_graph = defaultdict(list)
 
-        for sym in self.symbols:
-            caller = sym["name"]
+        for sym in symbols:
+            caller = sym.get("name")
             calls = sym.get("calls", [])
 
             for callee in calls:
                 graph[caller].append(callee)
                 reverse_graph[callee].append(caller)
 
-        return {
+        self._graph_cache = {
             "calls": dict(graph),
             "called_by": dict(reverse_graph)
         }
-    
+        return self._graph_cache
 
-    def get_dependencies(self, function_name: str):
-        graph = self.build_graph()["calls"]
-        return graph.get(function_name, [])
+    def invalidate_cache(self) -> None:
+        """Invalidate cached graph (call after reindexing)"""
+        self._graph_cache = None
+        self._symbols_cache = None
 
-    def get_dependents(self, function_name: str):
-        reverse = self.build_graph()["called_by"]
-        return reverse.get(function_name, [])
+    def get_dependencies(self, function_name: str) -> List[str]:
+        """Get functions that this function calls"""
+        graph = self.build_graph()
+        return graph.get("calls", {}).get(function_name, [])
+
+    def get_dependents(self, function_name: str) -> List[str]:
+        """Get functions that call this function"""
+        graph = self.build_graph()
+        return graph.get("called_by", {}).get(function_name, [])
+
+    def get_call_chain(self, function_name: str, direction: str = "both", 
+                       max_depth: int = 3) -> Dict[str, Any]:
+        """
+        Get call chain up to max_depth.
+        
+        Args:
+            function_name: Starting function
+            direction: 'up' (callers), 'down' (callees), or 'both'
+            max_depth: Maximum depth to traverse
+        """
+        graph = self.build_graph()
+        calls = graph.get("calls", {})
+        called_by = graph.get("called_by", {})
+
+        result = {
+            "root": function_name,
+            "callers": [],
+            "callees": []
+        }
+
+        if direction in ("up", "both"):
+            result["callers"] = self._traverse_up(function_name, called_by, max_depth)
+
+        if direction in ("down", "both"):
+            result["callees"] = self._traverse_down(function_name, calls, max_depth)
+
+        return result
+
+    def _traverse_up(self, node: str, called_by: Dict, max_depth: int) -> List[Dict]:
+        """Traverse up the call chain (find callers)"""
+        result = []
+        visited = set()
+        queue = [(node, 0)]
+
+        while queue:
+            current, depth = queue.pop(0)
+            if depth >= max_depth or current in visited:
+                continue
+            visited.add(current)
+
+            for caller in called_by.get(current, []):
+                result.append({
+                    "from": caller,
+                    "to": current,
+                    "depth": depth + 1
+                })
+                queue.append((caller, depth + 1))
+
+        return result
+
+    def _traverse_down(self, node: str, calls: Dict, max_depth: int) -> List[Dict]:
+        """Traverse down the call chain (find callees)"""
+        result = []
+        visited = set()
+        queue = [(node, 0)]
+
+        while queue:
+            current, depth = queue.pop(0)
+            if depth >= max_depth or current in visited:
+                continue
+            visited.add(current)
+
+            for callee in calls.get(current, []):
+                result.append({
+                    "from": current,
+                    "to": callee,
+                    "depth": depth + 1
+                })
+                queue.append((callee, depth + 1))
+
+        return result
 
 # ========================================
 # FILE: .\backend\services\indexing\builder.py
 # ========================================
 
-from .models import FileEntry
+from pathlib import Path
+import uuid
+
+
+def generate_id() -> str:
+    """Generate a unique ID for a symbol"""
+    return str(uuid.uuid4())
 
 
 class IndexBuilder:
-    def build_file_entry(self, path, symbols, imports):
-        return FileEntry(
-            file_id=str(path),
-            path=str(path),
-            language="python",
-            lines=0,
-            symbols=[s.symbol_id for s in symbols],
-            imports=[i.module for i in imports]
-        )
+    """Builds index entries from parsed data"""
+    
+    def build_file_entry(self, path: Path, symbols: list, imports: list) -> dict:
+        """
+        Build a file entry dictionary.
+        
+        Args:
+            path: Path to the file
+            symbols: List of symbol objects (dicts) from this file
+            imports: List of import objects (dicts) from this file
+        
+        Returns:
+            File entry dict
+        """
+        return {
+            "file_id": str(path),
+            "path": str(path),
+            "language": "python",
+            "lines": 0,  # Will be updated with actual line count if needed
+            "symbols": [s.get("symbol_id") for s in symbols if isinstance(s, dict)],
+            "imports": [i.get("module") for i in imports if isinstance(i, dict)]
+        }
+    
+    def build_symbol_entry(self, name: str, symbol_type: str, file_path: str,
+                          start_line: int, end_line: int, parent: str = None,
+                          calls: list = None, referenced_vars: list = None) -> dict:
+        """
+        Build a symbol entry dictionary.
+        
+        Returns:
+            Symbol entry dict
+        """
+        return {
+            "symbol_id": generate_id(),
+            "name": name,
+            "type": symbol_type,
+            "file": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "parent": parent,
+            "calls": calls or [],
+            "referenced_vars": referenced_vars or []
+        }
 
 # ========================================
 # FILE: .\backend\services\indexing\index_service.py
@@ -2347,18 +3606,18 @@ from pathlib import Path
 
 from .scanner import ProjectScanner
 from .python_parser import PythonParser
-from .builder import IndexBuilder
+from .builder import IndexBuilder, generate_id
+from backend.services.indexing.serializer import IndexSerializer
 
 
 class IndexService:
     def __init__(self, project_config: dict):
         self.project_id = project_config["project_id"]
-        self.root_path = project_config["root_path"]
+        self.root_path = Path(project_config["root_path"])
+
         self.scanner = ProjectScanner(self.root_path)
         self.parser = PythonParser()
         self.builder = IndexBuilder()
-
-        self.serializer = None
 
         self.files = []
         self.symbols = []
@@ -2366,200 +3625,209 @@ class IndexService:
 
     def build_index(self):
         file_paths = self.scanner.scan()
+        print(f"Found {len(file_paths)} Python files")
 
         for file_path in file_paths:
-            source = Path(file_path).read_text(encoding="utf-8")
+            try:
+                source = Path(file_path).read_text(encoding="utf-8")
+                symbols, imports = self.parser.parse(str(file_path), source)
 
-            symbols, imports = self.parser.parse(
-                str(file_path),
-                source
-            )
+                # Add file entry
+                self.files.append({
+                    "file_id": str(file_path),
+                    "path": str(file_path),
+                    "language": "python",
+                    "lines": len(source.splitlines()),
+                    "symbols": [s.get("symbol_id") for s in symbols],
+                    "imports": [i.get("module") for i in imports]
+                })
 
-            self.symbols.extend(symbols)
-            self.imports.extend(imports)
+                # Extend symbols and imports
+                self.symbols.extend(symbols)
+                self.imports.extend(imports)
 
-            file_entry = self.builder.build_file_entry(
-                file_path,
-                symbols,
-                imports
-            )
+                print(f"  Processed: {file_path.name} -> {len(symbols)} symbols, {len(imports)} imports")
 
-            self.files.append(file_entry)
+            except Exception as e:
+                print(f"  ERROR processing {file_path}: {e}")
+                continue
 
+        # Save index
+        serializer = IndexSerializer(str(self.root_path / "data" / "index"))
+        manifest = serializer.save(self.project_id, {
+            "files": self.files,
+            "symbols": self.symbols,
+            "imports": self.imports
+        })
+
+        return {
+            "manifest": manifest,
+            "files": self.files,
+            "symbols": self.symbols,
+            "imports": self.imports
+        }
+
+    def get_index(self):
+        """Return the current in-memory index"""
         return {
             "files": self.files,
             "symbols": self.symbols,
             "imports": self.imports
         }
-        
-    def get_index(self):
-        """
-        Compatibility layer for analysis services.
-
-        Returns the internal index structure.
-        """
-
-        # Case 1: if index already stored
-        if hasattr(self, "index") and self.index:
-            return self.index
-
-        # Case 2: if build method exists
-        if hasattr(self, "build_index"):
-            return self.build_index()
-
-        # Case 3: fallback empty safe structure
-        return {}
 
 # ========================================
 # FILE: .\backend\services\indexing\models.py
 # ========================================
 
-from dataclasses import dataclass, field
-from typing import List, Optional
+"""
+Index data models - all data is stored as plain dictionaries for JSON serialization.
 
+Expected dict formats:
 
-@dataclass
-class FileEntry:
-    file_id: str
-    path: str
-    language: str
-    lines: int
+File entry:
+{
+    "file_id": str,
+    "path": str,
+    "language": str,
+    "lines": int,
+    "symbols": List[str],  # symbol_ids
+    "imports": List[str]   # module names
+}
 
-    symbols: List[str] = field(default_factory=list)
-    imports: List[str] = field(default_factory=list)
+Symbol entry:
+{
+    "symbol_id": str,
+    "name": str,
+    "type": str,  # function | class | method | variable
+    "file": str,
+    "start_line": int,
+    "end_line": int,
+    "parent": Optional[str],
+    "calls": List[str],
+    "referenced_vars": List[str]
+}
 
+Import entry:
+{
+    "file": str,
+    "module": str,
+    "alias": Optional[str],
+    "type": str  # stdlib | third_party | local
+}
+"""
 
-@dataclass
-class SymbolEntry:
-    symbol_id: str
-    name: str
-    type: str  # function | class | method | variable
-
-    file: str
-
-    start_line: int
-    end_line: int
-
-    parent: Optional[str] = None
-
-    calls: List[str] = field(default_factory=list)
-    referenced_vars: List[str] = field(default_factory=list)
-
-
-@dataclass
-class ImportEntry:
-    file: str
-    module: str
-    alias: Optional[str]
-    type: str  # stdlib | third_party | local
+# No dataclasses - using dicts for simplicity and JSON compatibility
 
 # ========================================
 # FILE: .\backend\services\indexing\python_parser.py
 # ========================================
 
 import ast
-
-from .models import SymbolEntry
 from .utils import generate_id
 
 
 class CallVisitor(ast.NodeVisitor):
-
     def __init__(self):
         self.calls = []
 
     def visit_Call(self, node):
-
         if isinstance(node.func, ast.Name):
             self.calls.append(node.func.id)
-
         elif isinstance(node.func, ast.Attribute):
             self.calls.append(node.func.attr)
 
         self.generic_visit(node)
 
 
+class ImportVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.imports = []
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.imports.append({
+                "module": alias.name,
+                "alias": alias.asname,
+                "type": "unknown"  # Could be classified later
+            })
+
+    def visit_ImportFrom(self, node):
+        module = node.module or ""
+        for alias in node.names:
+            self.imports.append({
+                "module": f"{module}.{alias.name}" if module else alias.name,
+                "alias": alias.asname,
+                "type": "unknown"
+            })
+
+
 class PythonParser:
 
     def parse(self, file_path: str, source_code: str):
-        tree = ast.parse(source_code)
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError as e:
+            print(f"Syntax error in {file_path}: {e}")
+            return [], []
 
         symbols = []
         imports = []
 
-        # -----------------------
-        # Top-level functions
-        # -----------------------
+        # Parse imports first
+        import_visitor = ImportVisitor()
+        import_visitor.visit(tree)
+        imports = import_visitor.imports
 
         for node in tree.body:
-
+            # ---------------- FUNCTION ----------------
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-
                 visitor = CallVisitor()
                 visitor.visit(node)
 
-                symbols.append(
-                    SymbolEntry(
-                        symbol_id=generate_id(),
-                        name=node.name,
-                        type="function",
-                        file=file_path,
-                        start_line=node.lineno,
-                        end_line=getattr(node, "end_lineno", node.lineno),
-                        parent=None,
-                        calls=visitor.calls,
-                        referenced_vars=[]
-                    )
-                )
+                symbols.append({
+                    "symbol_id": generate_id(),
+                    "name": node.name,
+                    "type": "function",
+                    "file": file_path,
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                    "parent": None,
+                    "calls": visitor.calls,
+                    "referenced_vars": []
+                })
 
-            # -----------------------
-            # Classes
-            # -----------------------
-
+            # ---------------- CLASS ----------------
             elif isinstance(node, ast.ClassDef):
-                class_visitor = CallVisitor()
-                class_visitor.visit(node)
+                # Class itself (no calls)
+                symbols.append({
+                    "symbol_id": generate_id(),
+                    "name": node.name,
+                    "type": "class",
+                    "file": file_path,
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                    "parent": None,
+                    "calls": [],
+                    "referenced_vars": []
+                })
 
-                symbols.append(
-                    SymbolEntry(
-                        symbol_id=generate_id(),
-                        name=node.name,
-                        type="class",
-                        file=file_path,
-                        start_line=node.lineno,
-                        end_line=getattr(node, "end_lineno", node.lineno),
-                        parent=None,
-                        calls=class_visitor.calls,
-                        referenced_vars=[]
-                    )
-                )
-
-                # -----------------------
-                # Methods
-                # -----------------------
-
+                # ---------------- METHODS ----------------
                 for child in node.body:
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         method_visitor = CallVisitor()
                         method_visitor.visit(child)
 
-                        symbols.append(
-                            SymbolEntry(
-                                symbol_id=generate_id(),
-                                name=child.name,
-                                type="method",
-                                file=file_path,
-                                start_line=child.lineno,
-                                end_line=getattr(
-                                    child,
-                                    "end_lineno",
-                                    child.lineno
-                                ),
-                                parent=node.name,
-                                calls=method_visitor.calls,
-                                referenced_vars=[]
-                            )
-                        )
+                        symbols.append({
+                            "symbol_id": generate_id(),
+                            "name": child.name,
+                            "type": "method",
+                            "file": file_path,
+                            "start_line": child.lineno,
+                            "end_line": getattr(child, "end_lineno", child.lineno),
+                            "parent": node.name,
+                            "calls": method_visitor.calls,
+                            "referenced_vars": []
+                        })
 
         return symbols, imports
 
@@ -2597,97 +3865,103 @@ class ProjectScanner:
 
 from pathlib import Path
 import json
-from datetime import datetime
-
-from .models import FileEntry, SymbolEntry, ImportEntry
+from typing import Dict, Any
 
 
 class IndexSerializer:
+    """Handles saving and loading index data to/from disk"""
+    
     def __init__(self, base_path: str):
         self.base_path = Path(base_path)
 
-    def _ensure_dir(self, project_id: str):
+    def _ensure_dir(self, project_id: str) -> Path:
+        """Ensure project directory exists"""
         project_dir = self.base_path / project_id
         project_dir.mkdir(parents=True, exist_ok=True)
         return project_dir
 
-    def _to_dict_file(self, file: FileEntry):
-        return {
-            "file_id": file.file_id,
-            "path": file.path,
-            "language": file.language,
-            "lines": file.lines,
-            "symbols": file.symbols,
-            "imports": file.imports
-        }
-
-    def _to_dict_symbol(self, symbol: SymbolEntry):
-        return {
-            "symbol_id": symbol.symbol_id,
-            "name": symbol.name,
-            "type": symbol.type,
-            "file": symbol.file,
-            "start_line": symbol.start_line,
-            "end_line": symbol.end_line,
-            "parent": symbol.parent,
-            "calls": symbol.calls,
-            "referenced_vars": symbol.referenced_vars
-        }
-
-    def _to_dict_import(self, imp: ImportEntry):
-        return {
-            "file": imp.file,
-            "module": imp.module,
-            "alias": imp.alias,
-            "type": imp.type
-        }
-
-    def save(self, project_id: str, index_data: dict):
+    def save(self, project_id: str, index_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save index data to disk.
+        
+        Args:
+            project_id: Unique project identifier
+            index_data: Dictionary with 'files', 'symbols', 'imports' keys
+        
+        Returns:
+            Manifest dictionary with counts
+        """
         project_dir = self._ensure_dir(project_id)
 
-        files = index_data["files"]
-        symbols = index_data["symbols"]
-        imports = index_data["imports"]
+        files = index_data.get("files", [])
+        symbols = index_data.get("symbols", [])
+        imports = index_data.get("imports", [])
 
-        # Convert objects → dicts
-        files_json = [self._to_dict_file(f) for f in files]
-        symbols_json = [self._to_dict_symbol(s) for s in symbols]
-        imports_json = [self._to_dict_import(i) for i in imports]
-
-        # Write files
+        # Save individual files
         (project_dir / "files.json").write_text(
-            json.dumps(files_json, indent=2),
+            json.dumps(files, indent=2, default=str), 
             encoding="utf-8"
         )
-
         (project_dir / "symbols.json").write_text(
-            json.dumps(symbols_json, indent=2),
+            json.dumps(symbols, indent=2, default=str), 
             encoding="utf-8"
         )
-
         (project_dir / "imports.json").write_text(
-            json.dumps(imports_json, indent=2),
+            json.dumps(imports, indent=2, default=str), 
             encoding="utf-8"
         )
 
-        # Manifest
+        # Create manifest
         manifest = {
             "project_id": project_id,
-            "indexed_at": datetime.utcnow().isoformat(),
-            "files_count": len(files_json),
-            "symbols_count": len(symbols_json),
-            "imports_count": len(imports_json),
-            "files_index": "files.json",
-            "symbols_index": "symbols.json",
-            "imports_index": "imports.json"
+            "files_count": len(files),
+            "symbols_count": len(symbols),
+            "imports_count": len(imports),
+            "version": "1.0"
         }
 
         (project_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2),
+            json.dumps(manifest, indent=2), 
             encoding="utf-8"
         )
 
         return manifest
+
+    def load(self, project_id: str) -> Dict[str, Any]:
+        """
+        Load index data from disk.
+        
+        Returns:
+            Dictionary with 'files', 'symbols', 'imports' keys
+        """
+        project_dir = self.base_path / project_id
+        
+        files = []
+        symbols = []
+        imports = []
+        
+        files_path = project_dir / "files.json"
+        if files_path.exists():
+            files = json.loads(files_path.read_text(encoding="utf-8"))
+        
+        symbols_path = project_dir / "symbols.json"
+        if symbols_path.exists():
+            symbols = json.loads(symbols_path.read_text(encoding="utf-8"))
+        
+        imports_path = project_dir / "imports.json"
+        if imports_path.exists():
+            imports = json.loads(imports_path.read_text(encoding="utf-8"))
+        
+        return {
+            "files": files,
+            "symbols": symbols,
+            "imports": imports
+        }
+    
+    def manifest_exists(self, project_id: str) -> bool:
+        """Check if a project has been indexed"""
+        manifest_path = self.base_path / project_id / "manifest.json"
+        return manifest_path.exists()
 
 # ========================================
 # FILE: .\backend\services\indexing\utils.py
@@ -2779,149 +4053,1323 @@ class OllamaClient:
             yield f"[ERROR: Failed to reach Ollama instance. Details: {e}]"
 
 # ========================================
-# FILE: .\backend\services\llm\prompt_builder.py
+# FILE: .\backend\services\refactor\change_engine.py
 # ========================================
 
-import json
+# backend/services/refactor/change_engine.py
 
-
-class PromptBuilder:
-
-    def build(self, question: str, intent: str, context: dict):
-
-        return f"""
-You are a senior software engineering assistant.
-
-Your job is to analyze codebase context and answer questions accurately.
-
----
-
-USER QUESTION:
-{question}
-
----
-
-INTENT:
-{intent}
-
----
-
-CODE CONTEXT:
-{json.dumps(context, indent=2)}
-
----
-
-INSTRUCTIONS:
-- Be precise
-- Use only provided context
-- If unsure, say "Not enough information in codebase"
-- Explain clearly like a senior engineer reviewing code
-
----
-ANSWER:
-"""
-
-# ========================================
-# FILE: .\backend\services\reasoning\context_builder.py
-# ========================================
-
+import ast
+import re
 from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+import uuid
 
-from backend.services.reasoning.symbol_lookup_service import SymbolLookupService
-from backend.services.reasoning.source_loader import SourceLoader
-
-
-class ContextBuilder:
-
-    def __init__(self, index_path: Path):
-
-        self.lookup = SymbolLookupService(index_path)
-        self.loader = SourceLoader()
-
-    def build(self, symbol_name: str):
-
-        symbol = self.lookup.get_symbol(symbol_name)
-
-        if symbol is None:
-            return None
-
-        source = self.loader.get_source(
-            symbol["file"],
-            symbol["start_line"],
-            symbol["end_line"]
-        )
-
-        return {
-            "symbol": symbol,
-            "source": source
-        }
-
-# ========================================
-# FILE: .\backend\services\reasoning\source_loader.py
-# ========================================
-
-from pathlib import Path
+from backend.models.refactor import (
+    RefactorType, Parameter, CallSite, FunctionDetail,
+    FileChange, ChangeType, RefactoringPlan
+)
+from backend.services.refactor.code_analyzer import CodeAnalyzer
+from backend.services.refactor.impact_scanner import ImpactScanner
 
 
-class SourceLoader:
-
-    def get_source(
+class ChangeEngine:
+    """
+    Generates concrete code changes for refactoring operations.
+    Handles both simple (AST-based) and complex (LLM-based) changes.
+    """
+    
+    def __init__(self, project_id: str = None):
+        self.analyzer = CodeAnalyzer(project_id)
+        self.scanner = ImpactScanner(project_id)
+        self.project_id = project_id
+    
+    def generate_add_parameter(
         self,
-        file_path: str,
-        start_line: int,
-        end_line: int
-    ):
+        function_name: str,
+        new_param: Parameter,
+        default_value: Optional[str] = None,
+        position: Optional[int] = None
+    ) -> RefactoringPlan:
+        """
+        Generate changes for adding a parameter to a function.
+        
+        Args:
+            function_name: Name of target function
+            new_param: Parameter to add
+            default_value: Default value for parameter
+            position: Position to insert (None = end)
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            raise ValueError(f"Function '{function_name}' not found")
+        
+        changes = []
+        
+        # Set default value if provided
+        if default_value:
+            new_param.default_value = default_value
+            new_param.is_required = False
+        
+        # 1. Update function definition
+        func_change = self._update_function_definition(
+            func_detail, new_param, position
+        )
+        changes.append(func_change)
+        
+        # 2. Update all callers
+        for caller in func_detail.callers:
+            caller_change = self._update_caller_for_added_param(
+                caller, function_name, new_param, default_value
+            )
+            if caller_change:
+                changes.append(caller_change)
+        
+        # Calculate confidence (simple changes = high confidence)
+        confidence = 0.9 if len(func_detail.callers) <= 5 else 0.7
+        
+        return RefactoringPlan(
+            id=str(uuid.uuid4()),
+            target_function=function_name,
+            refactor_type=RefactorType.ADD_PARAMETER,
+            changes=changes,
+            affected_files=list(set([c.file_path for c in changes])),
+            confidence=confidence,
+            requires_review=len(func_detail.callers) > 10,
+            warning=None if len(func_detail.callers) <= 10 else "Many callers to update - review recommended"
+        )
+    
+    def generate_remove_parameter(
+        self,
+        function_name: str,
+        parameter_name: str
+    ) -> RefactoringPlan:
+        """
+        Generate changes for removing a parameter from a function.
+        
+        Args:
+            function_name: Name of target function
+            parameter_name: Name of parameter to remove
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            raise ValueError(f"Function '{function_name}' not found")
+        
+        # Find parameter
+        target_param = None
+        param_index = -1
+        for i, p in enumerate(func_detail.parameters):
+            if p.name == parameter_name:
+                target_param = p
+                param_index = i
+                break
+        
+        if not target_param:
+            raise ValueError(f"Parameter '{parameter_name}' not found")
+        
+        changes = []
+        
+        # 1. Update function definition
+        func_change = self._update_function_definition_remove(
+            func_detail, param_index, parameter_name
+        )
+        changes.append(func_change)
+        
+        # 2. Update callers that use this parameter
+        for caller in func_detail.callers:
+            if self._caller_uses_parameter(caller, param_index, parameter_name):
+                caller_change = self._update_caller_for_removed_param(
+                    caller, function_name, param_index, parameter_name
+                )
+                if caller_change:
+                    changes.append(caller_change)
+        
+        confidence = 0.85 if len(func_detail.callers) <= 5 else 0.7
+        
+        return RefactoringPlan(
+            id=str(uuid.uuid4()),
+            target_function=function_name,
+            refactor_type=RefactorType.REMOVE_PARAMETER,
+            changes=changes,
+            affected_files=list(set([c.file_path for c in changes])),
+            confidence=confidence,
+            requires_review=True,  # Removing parameters always requires review
+            warning="Removing parameters can break client code. Test thoroughly."
+        )
+    
+    def generate_rename_function(
+        self,
+        function_name: str,
+        new_name: str
+    ) -> RefactoringPlan:
+        """
+        Generate changes for renaming a function.
+        
+        Args:
+            function_name: Current function name
+            new_name: New function name
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            raise ValueError(f"Function '{function_name}' not found")
+        
+        changes = []
+        
+        # 1. Update function definition
+        func_change = self._rename_function_definition(
+            func_detail, new_name
+        )
+        changes.append(func_change)
+        
+        # 2. Update all callers
+        for caller in func_detail.callers:
+            caller_change = self._rename_function_in_caller(
+                caller, function_name, new_name
+            )
+            if caller_change:
+                changes.append(caller_change)
+        
+        confidence = 0.95  # Rename is straightforward
+        
+        return RefactoringPlan(
+            id=str(uuid.uuid4()),
+            target_function=function_name,
+            refactor_type=RefactorType.RENAME_FUNCTION,
+            changes=changes,
+            affected_files=list(set([c.file_path for c in changes])),
+            confidence=confidence,
+            requires_review=len(func_detail.callers) > 5,
+            warning="Function renaming may affect dynamic imports or reflection" if len(func_detail.callers) > 10 else None
+        )
+    
+    def _update_function_definition(
+        self,
+        func_detail: FunctionDetail,
+        new_param: Parameter,
+        position: Optional[int] = None
+    ) -> FileChange:
+        """Update function definition to include new parameter"""
+        
+        lines = func_detail.source_code.split('\n')
+        if not lines:
+            raise ValueError("Empty source code")
+        
+        # Find the function definition line
+        def_line_index = 0
+        for i, line in enumerate(lines):
+            if re.match(rf'(async\s+)?def\s+{re.escape(func_detail.name)}\s*\(', line):
+                def_line_index = i
+                break
+        
+        def_line = lines[def_line_index]
+        
+        # Build new parameter string
+        param_str = new_param.name
+        if new_param.type_hint:
+            param_str += f": {new_param.type_hint}"
+        if new_param.default_value:
+            param_str += f" = {new_param.default_value}"
+        
+        # Insert parameter
+        if position is not None and position < len(func_detail.parameters):
+            # Insert at specific position
+            # This is complex; for simplicity, always add to end
+            pass
+        
+        # Add to end of parameters
+        if '(' in def_line and ')' in def_line:
+            # Find where to insert
+            if def_line.rstrip().endswith('):'):
+                # No parameters currently
+                new_def_line = def_line.replace('):', f', {param_str}):')
+            else:
+                # Has existing parameters
+                new_def_line = def_line.replace(')', f', {param_str})')
+        else:
+            new_def_line = def_line  # Fallback
+        
+        before = def_line
+        after = new_def_line
+        
+        return FileChange(
+            file_path=func_detail.file_path,
+            line_start=func_detail.line_start + def_line_index,
+            line_end=func_detail.line_start + def_line_index,
+            before=before,
+            after=after,
+            change_type=ChangeType.FUNCTION_DEFINITION,
+            description=f"Add parameter '{new_param.name}' to function '{func_detail.name}'"
+        )
+    
+    def _update_caller_for_added_param(
+        self,
+        caller: CallSite,
+        function_name: str,
+        new_param: Parameter,
+        default_value: Optional[str]
+    ) -> Optional[FileChange]:
+        """Update a caller to include the new parameter"""
+        
+        if not default_value and new_param.default_value:
+            default_value = new_param.default_value
+        
+        # If no default value, need to add argument
+        if not default_value:
+            # Check if caller already has the argument (shouldn't happen)
+            if any(function_name in arg for arg in caller.arguments):
+                return None
+            
+            # Add argument with default value or None
+            new_arg = f"{new_param.name}={default_value or 'None'}"
+            
+            # Update the call line
+            old_line = caller.source_line
+            if '(' in old_line and ')' in old_line:
+                if old_line.rstrip().endswith('):'):
+                    new_line = old_line.replace(')', f', {new_arg})')
+                elif old_line.rstrip().endswith(')'):
+                    new_line = old_line.replace(')', f', {new_arg})')
+                else:
+                    new_line = old_line
+            else:
+                new_line = old_line
+            
+            return FileChange(
+                file_path=caller.file_path,
+                line_start=caller.line_number,
+                line_end=caller.line_number,
+                before=old_line,
+                after=new_line,
+                change_type=ChangeType.CALLER_UPDATE,
+                description=f"Add '{new_arg}' argument when calling '{function_name}'"
+            )
+        
+        return None  # No change needed if parameter has default
+    
+    def _update_function_definition_remove(
+        self,
+        func_detail: FunctionDetail,
+        param_index: int,
+        param_name: str
+    ) -> FileChange:
+        """Update function definition to remove a parameter"""
+        
+        lines = func_detail.source_code.split('\n')
+        if not lines:
+            raise ValueError("Empty source code")
+        
+        # Find the function definition line
+        def_line_index = 0
+        for i, line in enumerate(lines):
+            if re.match(rf'(async\s+)?def\s+{re.escape(func_detail.name)}\s*\(', line):
+                def_line_index = i
+                break
+        
+        def_line = lines[def_line_index]
+        
+        # Remove parameter from definition
+        # Pattern: remove ", param_name" or "param_name, " or "param_name"
+        patterns = [
+            rf',\s*{re.escape(param_name)}(?:\s*:\s*[^=,]+)?(?:\s*=\s*[^,)]+)?',
+            rf'{re.escape(param_name)}(?:\s*:\s*[^=,]+)?(?:\s*=\s*[^,)]+)?,\s*',
+            rf'{re.escape(param_name)}(?:\s*:\s*[^=,]+)?(?:\s*=\s*[^,)]+)?'
+        ]
+        
+        new_def_line = def_line
+        for pattern in patterns:
+            new_def_line = re.sub(pattern, '', new_def_line)
+            if new_def_line != def_line:
+                break
+        
+        # Clean up double commas
+        new_def_line = re.sub(r',\s*,', ',', new_def_line)
+        # Clean up spacing
+        new_def_line = re.sub(r'\(\s*,', '(', new_def_line)
+        new_def_line = re.sub(r',\s*\)', ')', new_def_line)
+        
+        return FileChange(
+            file_path=func_detail.file_path,
+            line_start=func_detail.line_start + def_line_index,
+            line_end=func_detail.line_start + def_line_index,
+            before=def_line,
+            after=new_def_line,
+            change_type=ChangeType.FUNCTION_DEFINITION,
+            description=f"Remove parameter '{param_name}' from function '{func_detail.name}'"
+        )
+    
+    def _update_caller_for_removed_param(
+        self,
+        caller: CallSite,
+        function_name: str,
+        param_index: int,
+        param_name: str
+    ) -> Optional[FileChange]:
+        """Update a caller to remove the argument for a deleted parameter"""
+        
+        old_line = caller.source_line
+        
+        # Try to remove the argument
+        # Patterns: param_name=value, or just value if positional
+        patterns = [
+            rf'{re.escape(param_name)}\s*=\s*[^,)]+,\s*',
+            rf',\s*{re.escape(param_name)}\s*=\s*[^,)]+',
+            rf'{re.escape(param_name)}\s*=\s*[^,)]+'
+        ]
+        
+        new_line = old_line
+        for pattern in patterns:
+            new_line = re.sub(pattern, '', new_line)
+            if new_line != old_line:
+                break
+        
+        # If still same, try positional removal
+        if new_line == old_line and param_index < len(caller.arguments):
+            # Remove by position (simplified)
+            args = caller.arguments
+            if param_index < len(args):
+                del args[param_index]
+                # Rebuild call line (simplified)
+                call_start = re.search(rf'{re.escape(function_name)}\s*\(', new_line)
+                if call_start:
+                    new_line = f"{function_name}({', '.join(args)})"
+        
+        if new_line != old_line:
+            return FileChange(
+                file_path=caller.file_path,
+                line_start=caller.line_number,
+                line_end=caller.line_number,
+                before=old_line,
+                after=new_line,
+                change_type=ChangeType.CALLER_UPDATE,
+                description=f"Remove argument for '{param_name}' when calling '{function_name}'"
+            )
+        
+        return None
+    
+    def _rename_function_definition(
+        self,
+        func_detail: FunctionDetail,
+        new_name: str
+    ) -> FileChange:
+        """Rename function in its definition"""
+        
+        lines = func_detail.source_code.split('\n')
+        def_line_index = 0
+        for i, line in enumerate(lines):
+            if re.match(rf'(async\s+)?def\s+{re.escape(func_detail.name)}\s*\(', line):
+                def_line_index = i
+                break
+        
+        def_line = lines[def_line_index]
+        new_def_line = re.sub(
+            rf'(async\s+)?def\s+{re.escape(func_detail.name)}',
+            rf'\g<1>def {new_name}',
+            def_line
+        )
+        
+        return FileChange(
+            file_path=func_detail.file_path,
+            line_start=func_detail.line_start + def_line_index,
+            line_end=func_detail.line_start + def_line_index,
+            before=def_line,
+            after=new_def_line,
+            change_type=ChangeType.FUNCTION_DEFINITION,
+            description=f"Rename function '{func_detail.name}' to '{new_name}'"
+        )
+    
+    def _rename_function_in_caller(
+        self,
+        caller: CallSite,
+        old_name: str,
+        new_name: str
+    ) -> Optional[FileChange]:
+        """Rename function call in caller"""
+        
+        old_line = caller.source_line
+        new_line = re.sub(rf'\b{re.escape(old_name)}\b', new_name, old_line)
+        
+        if new_line != old_line:
+            return FileChange(
+                file_path=caller.file_path,
+                line_start=caller.line_number,
+                line_end=caller.line_number,
+                before=old_line,
+                after=new_line,
+                change_type=ChangeType.CALLER_UPDATE,
+                description=f"Update call to '{old_name}' -> '{new_name}'"
+            )
+        
+        return None
+    
+    def _caller_uses_parameter(
+        self,
+        caller: CallSite,
+        param_index: int,
+        param_name: str
+    ) -> bool:
+        """Check if caller provides a value for the parameter"""
+        # Check positional
+        if param_index < caller.argument_count:
+            return True
+        # Check keyword
+        if any(param_name in arg for arg in caller.arguments):
+            return True
+        return False
+    
+    def generate_plan(self, refactor_type: RefactorType, **kwargs) -> RefactoringPlan:
+        """Generate a refactoring plan based on type"""
+        if refactor_type == RefactorType.ADD_PARAMETER:
+            return self.generate_add_parameter(
+                kwargs['function_name'],
+                kwargs['new_parameter'],
+                kwargs.get('default_value'),
+                kwargs.get('position')
+            )
+        elif refactor_type == RefactorType.REMOVE_PARAMETER:
+            return self.generate_remove_parameter(
+                kwargs['function_name'],
+                kwargs['parameter_name']
+            )
+        elif refactor_type == RefactorType.RENAME_FUNCTION:
+            return self.generate_rename_function(
+                kwargs['function_name'],
+                kwargs['new_name']
+            )
+        else:
+            raise ValueError(f"Unsupported refactor type: {refactor_type}")
 
-        path = Path(file_path)
+# ========================================
+# FILE: .\backend\services\refactor\code_analyzer.py
+# ========================================
 
-        if not path.exists():
-            return ""
+# backend/services/refactor/code_analyzer.py
 
-        lines = path.read_text(
-            encoding="utf-8",
-            errors="ignore"
-        ).splitlines()
+import ast
+import re
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Tuple
+from dataclasses import dataclass
 
-        return "\n".join(
-            lines[start_line - 1:end_line]
+from backend.models.refactor import Parameter, CallSite, FunctionDetail
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.project_service import ProjectService
+from config import INDEX_DIR
+
+
+class CodeAnalyzer:
+    """Extracts detailed function information including call sites"""
+
+    def __init__(self, project_id: str = None):
+        if not project_id:
+            project = ProjectService().get_active_project()
+            if project:
+                project_id = project["project_id"]
+            else:
+                raise ValueError("No active project found and no project_id provided")
+        
+        self.project_id = project_id
+        self.index_path = INDEX_DIR / project_id
+        self.graph_service = CallGraphService(str(self.index_path))
+        
+        # Cache for source code lines
+        self._source_cache: Dict[str, List[str]] = {}
+        self._symbols_cache: List[Dict] = None
+
+    def get_function_detail(self, function_name: str) -> Optional[FunctionDetail]:
+        """Get complete detail for a function including call sites"""
+        
+        # Get function info from graph service
+        symbols = self._load_symbols()
+        function_info = self._find_function_in_symbols(symbols, function_name)
+        
+        if not function_info:
+            return None
+        
+        # Extract source code
+        file_path = function_info.get("file")
+        start_line = function_info.get("start_line")
+        end_line = function_info.get("end_line")
+        
+        source_code = self._extract_source_code(file_path, start_line, end_line)
+        
+        # Parse parameters from source or AST
+        parameters = self._extract_parameters(source_code, function_info)
+        
+        # Get callers - NOW USING CALL GRAPH SERVICE
+        callers = self._get_callers_with_context(function_name)
+        
+        # Debug output
+        print(f"[CodeAnalyzer] Function '{function_name}' has {len(callers)} caller(s)")
+        
+        return FunctionDetail(
+            name=function_name,
+            file_path=file_path,
+            line_start=start_line,
+            line_end=end_line,
+            source_code=source_code,
+            parameters=parameters,
+            return_type=function_info.get("return_type"),
+            decorators=function_info.get("decorators", []),
+            is_async=function_info.get("is_async", False),
+            is_method=bool(function_info.get("parent")),
+            class_name=function_info.get("parent"),
+            docstring=function_info.get("docstring"),
+            callers=callers
         )
 
-# ========================================
-# FILE: .\backend\services\reasoning\symbol_lookup_service.py
-# ========================================
+    def _load_symbols(self) -> List[Dict]:
+        """Load symbols from index"""
+        import json
+        if self._symbols_cache is not None:
+            return self._symbols_cache
+            
+        symbols_file = self.index_path / "symbols.json"
+        if not symbols_file.exists():
+            print(f"[CodeAnalyzer] symbols.json not found at {symbols_file}")
+            self._symbols_cache = []
+            return self._symbols_cache
+        
+        with open(symbols_file, 'r', encoding='utf-8') as f:
+            self._symbols_cache = json.load(f)
+        return self._symbols_cache
 
-import json
-from pathlib import Path
-
-
-class SymbolLookupService:
-
-    def __init__(self, index_path: Path):
-        self.index_path = Path(index_path)
-        self.symbols = self._load_symbols()
-
-    def _load_symbols(self):
-        file = self.index_path / "symbols.json"
-
-        if not file.exists():
-            return []
-
-        return json.loads(file.read_text(encoding="utf-8"))
-
-    def get_symbol(self, symbol_name: str):
-
-        for symbol in self.symbols:
-
-            if symbol["name"] == symbol_name:
-                return symbol
-
+    def _find_function_in_symbols(self, symbols: List[Dict], function_name: str) -> Optional[Dict]:
+        """Find function by name in symbols"""
+        for sym in symbols:
+            if sym.get("name") == function_name and sym.get("type") in ["function", "method"]:
+                return sym
         return None
 
+    def _extract_source_code(self, file_path: str, start_line: int, end_line: int) -> str:
+        """Extract source code lines for a function"""
+        if not file_path or not Path(file_path).exists():
+            return ""
+        
+        # Cache file content
+        if file_path not in self._source_cache:
+            try:
+                self._source_cache[file_path] = Path(file_path).read_text(encoding="utf-8").splitlines()
+            except Exception as e:
+                print(f"[CodeAnalyzer] Error reading {file_path}: {e}")
+                return ""
+        
+        lines = self._source_cache[file_path]
+        if start_line <= 0 or end_line > len(lines):
+            return ""
+        
+        return "\n".join(lines[start_line - 1:end_line])
+
+    def _extract_parameters(self, source_code: str, function_info: Dict) -> List[Parameter]:
+        """Extract parameters from source code using AST"""
+        parameters = []
+        
+        if not source_code or not source_code.strip():
+            return parameters
+        
+        try:
+            # Fix indentation issues
+            import textwrap
+            source_code = textwrap.dedent(source_code)
+            
+            tree = ast.parse(source_code)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in node.args.args:
+                        # Skip 'self' and 'cls' for cleaner display
+                        if arg.arg in ['self', 'cls']:
+                            continue
+                            
+                        param = Parameter(
+                            name=arg.arg,
+                            type_hint=self._get_type_hint(arg),
+                            default_value=None,
+                            is_required=True
+                        )
+                        parameters.append(param)
+                    
+                    # Handle default values
+                    defaults = node.args.defaults
+                    if defaults:
+                        offset = len(node.args.args) - len(defaults)
+                        for i, default in enumerate(defaults):
+                            if offset + i < len(parameters):
+                                try:
+                                    parameters[offset + i].default_value = ast.unparse(default)
+                                    parameters[offset + i].is_required = False
+                                except:
+                                    parameters[offset + i].default_value = str(default)
+                                    parameters[offset + i].is_required = False
+                    break
+        except SyntaxError as e:
+            # Fallback: try to get parameters from function_info
+            if 'parameters' in function_info:
+                for param_info in function_info.get('parameters', []):
+                    param = Parameter(
+                        name=param_info.get('name', 'unknown'),
+                        type_hint=param_info.get('type_hint'),
+                        default_value=param_info.get('default_value'),
+                        is_required=param_info.get('is_required', True)
+                    )
+                    parameters.append(param)
+        except Exception as e:
+            print(f"[CodeAnalyzer] Error parsing parameters: {e}")
+        
+        return parameters
+
+    def _get_type_hint(self, arg: ast.arg) -> Optional[str]:
+        """Extract type hint from argument"""
+        if arg.annotation:
+            try:
+                return ast.unparse(arg.annotation)
+            except:
+                return None
+        return None
+
+    def _get_callers_with_context(self, function_name: str) -> List[CallSite]:
+        """Get callers with source code context using call graph service"""
+        call_sites = []
+        
+        # Use the call graph service to find callers
+        graph = self.graph_service.build_graph()
+        called_by = graph.get("called_by", {})
+        caller_names = called_by.get(function_name, [])
+        
+        print(f"[CodeAnalyzer] Found {len(caller_names)} caller(s) in call graph for '{function_name}': {caller_names}")
+        
+        if not caller_names:
+            return call_sites
+        
+        symbols = self._load_symbols()
+        
+        # Build name to symbol map for quick lookup
+        symbol_map = {}
+        for sym in symbols:
+            name = sym.get("name")
+            if name:
+                symbol_map[name] = sym
+        
+        # Process each caller
+        for caller_name in caller_names:
+            caller_info = symbol_map.get(caller_name)
+            if not caller_info:
+                print(f"[CodeAnalyzer] Warning: Caller '{caller_name}' not found in symbols")
+                continue
+            
+            file_path = caller_info.get("file")
+            if not file_path:
+                continue
+            
+            # Try to find the exact call site line
+            call_lines = self._find_call_in_caller(file_path, caller_name, function_name)
+            
+            if call_lines:
+                for line_num, source_line, args in call_lines:
+                    call_sites.append(CallSite(
+                        file_path=file_path,
+                        line_number=line_num,
+                        calling_function=caller_name,
+                        arguments=args,
+                        source_line=source_line.strip(),
+                        argument_count=len(args)
+                    ))
+            else:
+                # If we can't find exact line, create a basic call site
+                call_sites.append(CallSite(
+                    file_path=file_path,
+                    line_number=caller_info.get("start_line", 0),
+                    calling_function=caller_name,
+                    arguments=[],
+                    source_line=f"Call to {function_name} in {caller_name}",
+                    argument_count=0
+                ))
+        
+        return call_sites
+
+    def _find_call_in_caller(self, file_path: str, caller_name: str, target_name: str) -> List[Tuple[int, str, List[str]]]:
+        """Find the exact line where caller calls target function"""
+        if not file_path or not Path(file_path).exists():
+            return []
+        
+        # Cache file content
+        if file_path not in self._source_cache:
+            try:
+                self._source_cache[file_path] = Path(file_path).read_text(encoding="utf-8").splitlines()
+            except Exception as e:
+                print(f"[CodeAnalyzer] Error reading {file_path}: {e}")
+                return []
+        
+        lines = self._source_cache[file_path]
+        
+        # Find the caller function's range
+        caller_start, caller_end = self._find_function_range(lines, caller_name)
+        if caller_start < 0:
+            return []
+        
+        results = []
+        
+        # Search within caller function for calls to target
+        for i in range(caller_start - 1, min(caller_end, len(lines))):
+            line = lines[i]
+            # Look for pattern: target_name(...) or self.target_name(...) or obj.target_name(...)
+            patterns = [
+                rf'{re.escape(target_name)}\s*\(',  # direct call
+                rf'self\.{re.escape(target_name)}\s*\(',  # method call
+                rf'\w+\.{re.escape(target_name)}\s*\(',  # object method call
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, line)
+                if match:
+                    # Extract arguments
+                    args_match = re.search(rf'{re.escape(target_name)}\s*\(([^)]*)\)', line)
+                    args = []
+                    if args_match:
+                        args_str = args_match.group(1)
+                        args = self._parse_arguments(args_str)
+                    
+                    results.append((i + 1, line, args))
+                    break  # Found a match for this line
+        
+        return results
+
+    def _find_function_range(self, lines: List[str], function_name: str) -> Tuple[int, int]:
+        """Find start and end line numbers of a function"""
+        start_line = -1
+        indent_level = None
+        
+        for i, line in enumerate(lines):
+            # Look for function definition (including methods with decorators)
+            patterns = [
+                rf'def\s+{re.escape(function_name)}\s*\(',
+                rf'async\s+def\s+{re.escape(function_name)}\s*\(',
+            ]
+            
+            for pattern in patterns:
+                if re.search(pattern, line):
+                    start_line = i + 1
+                    indent_level = len(line) - len(line.lstrip())
+                    break
+            
+            if start_line != -1:
+                break
+        
+        if start_line < 0:
+            return (-1, -1)
+        
+        # Find end of function (when indent returns to same or lower level)
+        end_line = len(lines)
+        for i in range(start_line, len(lines)):
+            if i == start_line - 1:
+                continue
+            
+            line = lines[i]
+            if not line.strip():  # Skip empty lines
+                continue
+            
+            if line.strip().startswith('#'):  # Skip comments
+                continue
+            
+            current_indent = len(line) - len(line.lstrip())
+            
+            # Function ends when we hit a line with same or less indent
+            # that starts a new definition or is not part of the function body
+            if current_indent <= indent_level:
+                # Check if this line starts a new function or class
+                if re.match(r'\s*def\s+\w+\s*\(', line) or re.match(r'\s*class\s+\w+', line):
+                    end_line = i
+                    break
+                # Also break if we're at module level (indent 0)
+                elif current_indent == 0:
+                    end_line = i
+                    break
+        
+        return (start_line, end_line)
+
+    def _parse_arguments(self, args_str: str) -> List[str]:
+        """Parse arguments from a function call string"""
+        if not args_str.strip():
+            return []
+        
+        # Simple parsing - split by commas but respect nested parentheses and brackets
+        args = []
+        current = []
+        paren_count = 0
+        bracket_count = 0
+        brace_count = 0
+        
+        for char in args_str:
+            if char == '(':
+                paren_count += 1
+            elif char == ')':
+                paren_count -= 1
+            elif char == '[':
+                bracket_count += 1
+            elif char == ']':
+                bracket_count -= 1
+            elif char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+            elif char == ',' and paren_count == 0 and bracket_count == 0 and brace_count == 0:
+                args.append(''.join(current).strip())
+                current = []
+                continue
+            current.append(char)
+        
+        if current:
+            args.append(''.join(current).strip())
+        
+        # Clean up arguments (remove self for method calls)
+        args = [arg for arg in args if arg and arg != 'self']
+        
+        return args
+
 # ========================================
-# FILE: .\backend\services\reasoning\__init__.py
+# FILE: .\backend\services\refactor\impact_scanner.py
 # ========================================
 
+# backend/services/refactor/impact_scanner.py
 
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Set, Tuple
+from dataclasses import dataclass
+from enum import Enum
+
+from backend.models.refactor import (
+    FunctionDetail, Parameter, CallSite, RefactorType
+)
+from backend.services.refactor.code_analyzer import CodeAnalyzer
+
+
+class ImpactLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+@dataclass
+class ImpactAnalysis:
+    """Result of impact analysis for a refactoring operation"""
+    impact_level: ImpactLevel
+    affected_files: List[str]
+    affected_callers: List[CallSite]
+    total_callers: int
+    breaking_changes: bool
+    warnings: List[str]
+    suggestions: List[str]
+    complexity_score: float  # 0-1, higher means more complex
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "impact_level": self.impact_level.value,
+            "affected_files": self.affected_files,
+            "affected_callers": [c.to_dict() for c in self.affected_callers],
+            "total_callers": self.total_callers,
+            "breaking_changes": self.breaking_changes,
+            "warnings": self.warnings,
+            "suggestions": self.suggestions,
+            "complexity_score": self.complexity_score
+        }
+
+
+class ImpactScanner:
+    """
+    Analyzes the impact of refactoring operations by examining
+    call relationships and code complexity.
+    """
+    
+    def __init__(self, project_id: str = None):
+        self.analyzer = CodeAnalyzer(project_id)
+    
+    def analyze_add_parameter(
+        self, 
+        function_name: str, 
+        new_parameter: Parameter,
+        default_value: Optional[str] = None
+    ) -> ImpactAnalysis:
+        """
+        Analyze impact of adding a new parameter to a function.
+        
+        Args:
+            function_name: Target function name
+            new_parameter: Parameter to add
+            default_value: Default value (makes it non-breaking)
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            return self._error_analysis(f"Function '{function_name}' not found")
+        
+        warnings = []
+        suggestions = []
+        
+        # Check if parameter already exists
+        existing_params = {p.name for p in func_detail.parameters}
+        if new_parameter.name in existing_params:
+            return self._error_analysis(f"Parameter '{new_parameter.name}' already exists")
+        
+        # Determine if this is a breaking change
+        has_default = default_value is not None or new_parameter.default_value is not None
+        breaking_changes = not has_default and len(func_detail.callers) > 0
+        
+        # Assess impact based on callers
+        total_callers = len(func_detail.callers)
+        affected_files = list(set([c.file_path for c in func_detail.callers]))
+        
+        if breaking_changes:
+            warnings.append(
+                f"Adding required parameter will break {total_callers} caller(s). "
+                f"Consider providing a default value."
+            )
+            suggestions.append(
+                f"Add default value '{default_value or 'None'}' to make it non-breaking"
+            )
+        
+        # Check call site complexity
+        complex_callers = self._find_complex_callers(func_detail.callers)
+        if complex_callers:
+            warnings.append(
+                f"{len(complex_callers)} caller(s) have complex argument expressions "
+                f"that may need careful updating"
+            )
+        
+        # Calculate impact level
+        impact_level = self._calculate_impact_level(
+            total_callers, 
+            breaking_changes, 
+            len(complex_callers),
+            func_detail.is_public_api()
+        )
+        
+        # Calculate complexity score
+        complexity_score = self._calculate_complexity_score(
+            total_callers,
+            len(complex_callers),
+            func_detail.parameters,
+            has_default
+        )
+        
+        return ImpactAnalysis(
+            impact_level=impact_level,
+            affected_files=affected_files,
+            affected_callers=func_detail.callers,
+            total_callers=total_callers,
+            breaking_changes=breaking_changes,
+            warnings=warnings,
+            suggestions=suggestions,
+            complexity_score=complexity_score
+        )
+    
+    def analyze_remove_parameter(
+        self,
+        function_name: str,
+        parameter_name: str
+    ) -> ImpactAnalysis:
+        """
+        Analyze impact of removing a parameter from a function.
+        
+        Args:
+            function_name: Target function name
+            parameter_name: Name of parameter to remove
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            return self._error_analysis(f"Function '{function_name}' not found")
+        
+        warnings = []
+        suggestions = []
+        
+        # Find the parameter
+        target_param = None
+        param_index = -1
+        for i, p in enumerate(func_detail.parameters):
+            if p.name == parameter_name:
+                target_param = p
+                param_index = i
+                break
+        
+        if not target_param:
+            return self._error_analysis(f"Parameter '{parameter_name}' not found")
+        
+        # Check if parameter is used in function body
+        is_used = self._is_parameter_used(func_detail, parameter_name)
+        if is_used:
+            warnings.append(
+                f"Parameter '{parameter_name}' appears to be used in the function body. "
+                f"Removing it requires logic changes."
+            )
+        
+        # Check if callers provide this argument
+        callers_using_param = self._find_callers_using_parameter(
+            func_detail.callers, 
+            param_index,
+            target_param
+        )
+        
+        total_callers = len(callers_using_param)
+        breaking_changes = total_callers > 0
+        
+        if breaking_changes:
+            warnings.append(
+                f"{total_callers} caller(s) provide this argument and will need to be updated"
+            )
+            suggestions.append(
+                f"Consider deprecating the parameter first by adding a warning, "
+                f"then remove in a future version"
+            )
+        
+        affected_files = list(set([c.file_path for c in callers_using_param]))
+        
+        # Calculate impact level
+        impact_level = self._calculate_impact_level(
+            total_callers,
+            breaking_changes,
+            0,  # No complex callers for removal
+            func_detail.is_public_api()
+        )
+        
+        # Calculate complexity score
+        complexity_score = self._calculate_complexity_score(
+            total_callers,
+            1 if is_used else 0,
+            func_detail.parameters,
+            False
+        )
+        
+        return ImpactAnalysis(
+            impact_level=impact_level,
+            affected_files=affected_files,
+            affected_callers=callers_using_param,
+            total_callers=total_callers,
+            breaking_changes=breaking_changes,
+            warnings=warnings,
+            suggestions=suggestions,
+            complexity_score=complexity_score
+        )
+    
+    def analyze_rename_function(
+        self,
+        function_name: str,
+        new_name: str
+    ) -> ImpactAnalysis:
+        """
+        Analyze impact of renaming a function.
+        
+        Args:
+            function_name: Current function name
+            new_name: Desired new name
+        """
+        func_detail = self.analyzer.get_function_detail(function_name)
+        if not func_detail:
+            return self._error_analysis(f"Function '{function_name}' not found")
+        
+        warnings = []
+        suggestions = []
+        
+        total_callers = len(func_detail.callers)
+        breaking_changes = total_callers > 0
+        
+        if breaking_changes:
+            warnings.append(
+                f"Renaming will break {total_callers} caller(s)"
+            )
+            suggestions.append(
+                f"Keep old function as deprecated wrapper calling the new one"
+            )
+            suggestions.append(
+                f"Use @deprecated decorator and schedule removal in future version"
+            )
+        
+        # Check for name conflicts
+        if self._function_exists(new_name):
+            warnings.append(f"Function '{new_name}' already exists elsewhere")
+            suggestions.append(f"Choose a different name")
+        
+        # Check if function is part of public API
+        if func_detail.is_public_api():
+            warnings.append(
+                f"This appears to be a public API function. Renaming is a breaking change "
+                f"for library users."
+            )
+        
+        affected_files = list(set([c.file_path for c in func_detail.callers]))
+        
+        impact_level = self._calculate_impact_level(
+            total_callers,
+            breaking_changes,
+            0,
+            func_detail.is_public_api()
+        )
+        
+        complexity_score = total_callers / 100.0 if total_callers < 100 else 1.0
+        
+        return ImpactAnalysis(
+            impact_level=impact_level,
+            affected_files=affected_files,
+            affected_callers=func_detail.callers,
+            total_callers=total_callers,
+            breaking_changes=breaking_changes,
+            warnings=warnings,
+            suggestions=suggestions,
+            complexity_score=complexity_score
+        )
+    
+    def _find_complex_callers(self, callers: List[CallSite]) -> List[CallSite]:
+        """Identify callers with complex argument expressions"""
+        complex_patterns = [
+            lambda x: '(' in x or ')' in x,  # Nested calls
+            lambda x: '+' in x or '-' in x,   # Arithmetic
+            lambda x: '[' in x or ']' in x,   # List/dict access
+            lambda x: '.' in x,                # Attribute access
+            lambda x: len(x) > 50,             # Very long expression
+        ]
+        
+        complex_callers = []
+        for caller in callers:
+            for arg in caller.arguments:
+                if any(pattern(arg) for pattern in complex_patterns):
+                    complex_callers.append(caller)
+                    break
+        
+        return complex_callers
+    
+    def _is_parameter_used(self, func_detail: FunctionDetail, param_name: str) -> bool:
+        """Check if parameter is referenced in function body (simplified)"""
+        # Simple check - look for parameter name in source code
+        # In production, would use AST analysis
+        if not func_detail.source_code:
+            return False
+        
+        # Skip self/cls parameters
+        if param_name in ['self', 'cls']:
+            return False
+        
+        # Check if parameter appears after function definition
+        lines = func_detail.source_code.split('\n')
+        body_lines = lines[1:] if len(lines) > 1 else []
+        
+        for line in body_lines:
+            # Look for param name as a word
+            import re
+            if re.search(rf'\b{re.escape(param_name)}\b', line):
+                # Skip if in parameter list or docstring
+                if not line.strip().startswith('"""') and not line.strip().startswith("'''"):
+                    if 'def ' not in line:
+                        return True
+        
+        return False
+    
+    def _find_callers_using_parameter(
+        self, 
+        callers: List[CallSite], 
+        param_index: int,
+        param: Parameter
+    ) -> List[CallSite]:
+        """Find callers that provide an argument for the specified parameter"""
+        using_callers = []
+        
+        for caller in callers:
+            # Positional argument
+            if param_index < caller.argument_count:
+                using_callers.append(caller)
+            # Keyword argument
+            elif any(param.name in arg for arg in caller.arguments):
+                using_callers.append(caller)
+        
+        return using_callers
+    
+    def _function_exists(self, function_name: str) -> bool:
+        """Check if a function with given name exists in the codebase"""
+        # This would need to check symbols.json
+        # Simplified for now
+        return False
+    
+    def _calculate_impact_level(
+        self,
+        total_callers: int,
+        breaking_changes: bool,
+        complex_caller_count: int,
+        is_public_api: bool
+    ) -> ImpactLevel:
+        """Calculate overall impact level"""
+        if is_public_api and breaking_changes:
+            return ImpactLevel.CRITICAL
+        elif breaking_changes and total_callers > 20:
+            return ImpactLevel.HIGH
+        elif breaking_changes and total_callers > 5:
+            return ImpactLevel.MEDIUM
+        elif breaking_changes or complex_caller_count > 0:
+            return ImpactLevel.MEDIUM
+        elif total_callers == 0:
+            return ImpactLevel.LOW
+        else:
+            return ImpactLevel.LOW
+    
+    def _calculate_complexity_score(
+        self,
+        total_callers: int,
+        complex_caller_count: int,
+        parameters: List[Parameter],
+        has_default: bool
+    ) -> float:
+        """Calculate complexity score (0-1, higher is more complex)"""
+        score = 0.0
+        
+        # Caller count factor
+        if total_callers > 50:
+            score += 0.4
+        elif total_callers > 10:
+            score += 0.2
+        elif total_callers > 0:
+            score += 0.1
+        
+        # Complex callers factor
+        if complex_caller_count > 10:
+            score += 0.3
+        elif complex_caller_count > 0:
+            score += 0.15
+        
+        # Parameter count factor
+        if len(parameters) > 5:
+            score += 0.2
+        
+        # Breaking vs non-breaking
+        if not has_default and total_callers > 0:
+            score += 0.2
+        
+        return min(score, 1.0)
+    
+    def _error_analysis(self, error_message: str) -> ImpactAnalysis:
+        """Return error analysis result"""
+        return ImpactAnalysis(
+            impact_level=ImpactLevel.CRITICAL,
+            affected_files=[],
+            affected_callers=[],
+            total_callers=0,
+            breaking_changes=True,
+            warnings=[error_message],
+            suggestions=["Verify function name and try again"],
+            complexity_score=1.0
+        )
+
+
+# Add helper method to FunctionDetail (in your models/refactor.py)
+def _add_is_public_api_method():
+    """Monkey patch for FunctionDetail to add is_public_api method"""
+    def is_public_api(self) -> bool:
+        """Check if function is likely a public API"""
+        # Not starting with underscore (unless it's __init__ etc)
+        if self.name.startswith('_') and not self.name.startswith('__'):
+            return False
+        # Has docstring
+        if self.docstring:
+            return True
+        # Is a method without underscore prefix
+        return not self.name.startswith('_')
+    
+    # Add method to FunctionDetail if not exists
+    if not hasattr(FunctionDetail, 'is_public_api'):
+        FunctionDetail.is_public_api = is_public_api_method
 
 # ========================================
 # FILE: .\backend\services\search\search_service.py
@@ -2977,109 +5425,820 @@ class SymbolSearchService:
         ]
 
 # ========================================
+# FILE: .\backend\services\task\background_task_manager.py
+# ========================================
+
+import threading
+from typing import Dict, Optional, List
+from datetime import datetime
+import uuid
+
+from backend.services.task.task_generator import TaskGenerator
+from backend.services.task.task_storage import TaskStorage
+from backend.services.analysis.crawler_review_service import CrawlerReviewService
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.services.indexing.index_service import IndexService
+from backend.config.task_config import TaskConfig
+from backend.models.task import AnalysisTask
+from config import DATA_DIR, INDEX_DIR
+
+
+class BackgroundTaskManager:
+    """Manages background task generation to prevent UI timeout"""
+    
+    _instance = None
+    _jobs: Dict[str, Dict] = {}
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._jobs = {}
+        return cls._instance
+    
+    def start_generation(self, project_id: str, include_llm: bool = True) -> str:
+        """Start background task generation and return job ID"""
+        
+        job_id = str(uuid.uuid4())[:8]
+        
+        self._jobs[job_id] = {
+            "id": job_id,
+            "project_id": project_id,
+            "include_llm": include_llm,
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "result": None,
+            "error": None
+        }
+        
+        # Start background thread
+        thread = threading.Thread(
+            target=self._run_generation,
+            args=(job_id, project_id, include_llm)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return job_id
+    
+    def _run_generation(self, job_id: str, project_id: str, include_llm: bool):
+        """Run task generation in background"""
+        try:
+            from datetime import datetime
+            from backend.services.project_service import ProjectService
+            from backend.models.task import TaskEvidence, AnalysisTask, TaskCategory, TaskPriority, TaskStatus
+            
+            # Get project config
+            project = ProjectService().get_project(project_id)
+            index_path = INDEX_DIR / project_id
+            
+            # Initialize services
+            index_service = IndexService(project)
+            graph_service = CallGraphService(index_path)
+            crawler_service = CrawlerReviewService(index_service, graph_service)
+            task_storage = TaskStorage(project_id, DATA_DIR)
+            task_generator = TaskGenerator(crawler_service, graph_service, project_id)
+            
+            # Generate tasks
+            new_tasks = task_generator.generate_tasks(include_llm=include_llm)
+            
+            # Load existing tasks
+            existing_tasks = task_storage.load_tasks()
+            existing_ids = {t["id"] for t in existing_tasks}
+            
+            # Add new tasks
+            for task in new_tasks:
+                if task.id not in existing_ids:
+                    existing_tasks.append(task.to_dict())
+            
+            # Save all tasks - convert dicts back to AnalysisTask objects
+            all_tasks = []
+            for t_dict in existing_tasks:
+                # Reconstruct evidence
+                evidence_objects = []
+                for e in t_dict.get("evidence", []):
+                    evidence_objects.append(TaskEvidence(
+                        symbol=e["symbol"],
+                        metric_type=e["metric_type"],
+                        metric_value=e["metric_value"],
+                        file_path=e["file_path"],
+                        line_range=e.get("line_range"),
+                        callers=e.get("callers", []),
+                        callees=e.get("callees", []),
+                        source=e.get("source", "rule_based")  # ADD SOURCE
+                    ))
+                
+                # Handle dates - convert string to datetime if needed
+                created_at = t_dict.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                elif created_at is None:
+                    created_at = datetime.now()
+                
+                updated_at = t_dict.get("updated_at")
+                if isinstance(updated_at, str):
+                    updated_at = datetime.fromisoformat(updated_at)
+                elif updated_at is None:
+                    updated_at = datetime.now()
+                
+                # Handle status
+                status_value = t_dict.get("status", "pending")
+                if isinstance(status_value, str):
+                    try:
+                        status = TaskStatus(status_value)
+                    except ValueError:
+                        status = TaskStatus.PENDING
+                else:
+                    status = status_value if hasattr(status_value, 'value') else TaskStatus.PENDING
+                
+                all_tasks.append(AnalysisTask(
+                    id=t_dict["id"],
+                    title=t_dict["title"],
+                    description=t_dict["description"],
+                    category=TaskCategory(t_dict["category"]),
+                    priority=TaskPriority(t_dict["priority"]),
+                    status=status,
+                    evidence=evidence_objects,
+                    suggested_fix=t_dict.get("suggested_fix"),
+                    impact_analysis=t_dict.get("impact_analysis"),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    notes=t_dict.get("notes")
+                ))
+            
+            task_storage.save_tasks(all_tasks)
+            
+            rule_count = len([t for t in new_tasks if "task_coupling" in t.id or "task_usage" in t.id])
+            llm_count = len([t for t in new_tasks if "task_llm" in t.id])
+            
+            self._jobs[job_id]["status"] = "completed"
+            self._jobs[job_id]["completed_at"] = datetime.now().isoformat()
+            self._jobs[job_id]["result"] = {
+                "rule_based_tasks": rule_count,
+                "llm_discovered_tasks": llm_count,
+                "total_tasks": len(existing_tasks)
+            }
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._jobs[job_id]["status"] = "failed"
+            self._jobs[job_id]["completed_at"] = datetime.now().isoformat()
+            self._jobs[job_id]["error"] = str(e)
+    
+    def get_job_status(self, job_id: str) -> Optional[Dict]:
+        """Get status of a background job"""
+        return self._jobs.get(job_id)
+    
+    def get_active_jobs(self) -> List[Dict]:
+        """Get all active (running) jobs"""
+        return [j for j in self._jobs.values() if j["status"] == "running"]
+    
+    def start_ai_only_generation(self, project_id: str) -> str:
+        """Start background generation of ONLY AI-discovered tasks"""
+        from datetime import datetime
+        
+        job_id = str(uuid.uuid4())[:8]
+        
+        self._jobs[job_id] = {
+            "id": job_id,
+            "project_id": project_id,
+            "type": "ai_only",
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "result": None,
+            "error": None
+        }
+        
+        # Start background thread
+        thread = threading.Thread(
+            target=self._run_ai_only_generation,
+            args=(job_id, project_id)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return job_id
+    
+    def _run_ai_only_generation(self, job_id: str, project_id: str):
+        """Run AI-only task generation in background"""
+        try:
+            from backend.services.project_service import ProjectService
+            from datetime import datetime
+            
+            project = ProjectService().get_project(project_id)
+            index_path = INDEX_DIR / project_id
+            
+            from backend.services.indexing.index_service import IndexService
+            from backend.services.graph.call_graph_service import CallGraphService
+            from backend.services.analysis.crawler_review_service import CrawlerReviewService
+            from backend.services.task.task_storage import TaskStorage
+            from backend.services.task.task_generator import TaskGenerator
+            from backend.models.task import TaskEvidence, AnalysisTask, TaskCategory, TaskPriority, TaskStatus
+            
+            # Initialize services
+            index_service = IndexService(project)
+            graph_service = CallGraphService(index_path)
+            crawler_service = CrawlerReviewService(index_service, graph_service)
+            task_storage = TaskStorage(project_id, DATA_DIR)
+            task_generator = TaskGenerator(crawler_service, graph_service, project_id)
+            
+            # Generate ONLY AI tasks
+            new_tasks = task_generator.generate_ai_only_tasks()
+            
+            # Load existing tasks
+            existing_tasks = task_storage.load_tasks()
+            existing_ids = {t["id"] for t in existing_tasks}
+            
+            # Add only new AI tasks
+            added_count = 0
+            for task in new_tasks:
+                if task.id not in existing_ids:
+                    existing_tasks.append(task.to_dict())
+                    added_count += 1
+            
+            # Save all tasks - convert dicts back to objects
+            all_tasks = []
+            for t_dict in existing_tasks:
+                # Handle evidence
+                evidence_objects = []
+                for e in t_dict.get("evidence", []):
+                    evidence_objects.append(TaskEvidence(
+                        symbol=e["symbol"],
+                        metric_type=e["metric_type"],
+                        metric_value=e["metric_value"],
+                        file_path=e["file_path"],
+                        line_range=e.get("line_range"),
+                        callers=e.get("callers", []),
+                        callees=e.get("callees", []),
+                        source=e.get("source", "rule_based")
+                    ))
+                
+                # Handle dates - they might be strings or datetime objects
+                created_at = t_dict.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                elif created_at is None:
+                    created_at = datetime.now()
+                
+                updated_at = t_dict.get("updated_at")
+                if isinstance(updated_at, str):
+                    updated_at = datetime.fromisoformat(updated_at)
+                elif updated_at is None:
+                    updated_at = datetime.now()
+                
+                # Handle status
+                status_value = t_dict.get("status", "pending")
+                if isinstance(status_value, str):
+                    try:
+                        status = TaskStatus(status_value)
+                    except ValueError:
+                        status = TaskStatus.PENDING
+                else:
+                    status = status_value if hasattr(status_value, 'value') else TaskStatus.PENDING
+                
+                all_tasks.append(AnalysisTask(
+                    id=t_dict["id"],
+                    title=t_dict["title"],
+                    description=t_dict["description"],
+                    category=TaskCategory(t_dict["category"]),
+                    priority=TaskPriority(t_dict["priority"]),
+                    status=status,
+                    evidence=evidence_objects,
+                    suggested_fix=t_dict.get("suggested_fix"),
+                    impact_analysis=t_dict.get("impact_analysis"),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    notes=t_dict.get("notes")
+                ))
+            
+            task_storage.save_tasks(all_tasks)
+            
+            self._jobs[job_id]["status"] = "completed"
+            self._jobs[job_id]["completed_at"] = datetime.now().isoformat()
+            self._jobs[job_id]["result"] = {
+                "ai_tasks_generated": len(new_tasks),
+                "ai_tasks_added": added_count,
+                "total_tasks": len(existing_tasks)
+            }
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._jobs[job_id]["status"] = "failed"
+            self._jobs[job_id]["completed_at"] = datetime.now().isoformat()
+            self._jobs[job_id]["error"] = str(e)
+
+# ========================================
+# FILE: .\backend\services\task\llm_task_discovery.py
+# ========================================
+
+import json
+from pathlib import Path
+import re
+from typing import List, Dict
+from datetime import datetime
+import uuid
+
+from backend.services.llm.ollama_client import OllamaClient
+from backend.models.task import (
+    AnalysisTask, TaskCategory, TaskPriority, 
+    TaskStatus, TaskEvidence
+)
+
+
+class LLMTaskDiscovery:
+    """Discovers tasks using LLM analysis of codebase"""
+    
+    def __init__(self, crawler_service, graph_service, config):
+        self.crawler = crawler_service
+        self.graph = graph_service
+        self.config = config
+        self.llm = OllamaClient(model=config.llm_model)
+    
+    def discover_tasks(self, max_tasks: int = None) -> List[AnalysisTask]:
+        """Discover tasks by analyzing codebase with LLM"""
+        
+        if not self.config.llm_enabled:
+            return []
+        
+        max_tasks = max_tasks or self.config.llm_max_tasks
+        
+        # Build context for LLM
+        review_context = self.crawler.build_review_context()
+        hotspots = review_context.get("hotspots", [])[:20]  # Top 20 hotspots
+        arch_summary = review_context.get("architecture_summary", {})
+        
+        prompt = self._build_discovery_prompt(hotspots, arch_summary, max_tasks)
+        
+        try:
+            response = self.llm.generate(prompt)
+            tasks = self._parse_llm_response(response)
+            return tasks[:max_tasks]
+        except Exception as e:
+            print(f"LLM task discovery failed: {e}")
+            return []
+    
+    def _build_discovery_prompt(self, hotspots: List[Dict], arch_summary: Dict, max_tasks: int) -> str:
+        """Build prompt for LLM to discover tasks"""
+        
+        hotspots_text = ""
+        for h in hotspots[:10]:
+            hotspots_text += f"- {h['symbol']}: {h['type']} = {h['count']}\n"
+        
+        return f"""You are a senior software architect analyzing a Python codebase.
+
+ARCHITECTURE SUMMARY:
+- Total functions: {arch_summary.get('total_nodes', 0)}
+- Total dependencies: {arch_summary.get('total_edges', 0)}
+- Average fan-out: {arch_summary.get('avg_fan_out', 0):.1f}
+- Max fan-out: {arch_summary.get('max_fan_out', 0)}
+- Max fan-in: {arch_summary.get('max_fan_in', 0)}
+
+TOP HOTSPOTS (rule-based detection):
+{hotspots_text}
+
+Based on this analysis, suggest {max_tasks} specific, actionable improvements.
+
+Focus on issues that rule-based detection might miss:
+1. Design pattern violations or anti-patterns
+2. Potential race conditions or async issues
+3. Security vulnerabilities
+4. Performance bottlenecks (N+1 queries, inefficient loops)
+5. Error handling gaps
+6. Code duplication opportunities
+7. Wrong abstraction levels
+8. Missing validation or sanitization
+9. Thread safety concerns
+10. Resource leaks (file handles, connections)
+
+Return ONLY valid JSON in this exact format:
+{{
+  "tasks": [
+    {{
+      "title": "Brief title (max 60 chars)",
+      "description": "Detailed explanation of the issue (2-3 sentences)",
+      "category": "architecture|maintainability|performance|security|reliability",
+      "priority": "critical|high|medium|low",
+      "suggested_fix": "Specific code change recommendation",
+      "symbol_hint": "Optional: specific function/class name if relevant"
+    }}
+  ]
+}}
+
+Do not include any text outside the JSON."""
+    
+    def _parse_llm_response(self, response: str) -> List[AnalysisTask]:
+        """Parse LLM response into AnalysisTask objects"""
+        
+        tasks = []
+        
+        # Extract JSON from response
+        json_match = re.search(r'\{[\s\S]*"tasks"[\s\S]*\}', response)
+        if not json_match:
+            print("No JSON found in LLM response")
+            return []
+        
+        try:
+            data = json.loads(json_match.group())
+            raw_tasks = data.get("tasks", [])
+            
+            for raw in raw_tasks:
+                # Map category string to TaskCategory enum
+                category_str = raw.get("category", "maintainability")
+                category_map = {
+                    "architecture": TaskCategory.ARCHITECTURE,
+                    "maintainability": TaskCategory.MAINTAINABILITY,
+                    "performance": TaskCategory.PERFORMANCE,
+                    "security": TaskCategory.SECURITY,
+                    "reliability": TaskCategory.RELIABILITY,
+                    "complexity": TaskCategory.COMPLEXITY
+                }
+                category = category_map.get(category_str, TaskCategory.MAINTAINABILITY)
+                
+                # Map priority string
+                priority_str = raw.get("priority", "medium")
+                priority_map = {
+                    "critical": TaskPriority.CRITICAL,
+                    "high": TaskPriority.HIGH,
+                    "medium": TaskPriority.MEDIUM,
+                    "low": TaskPriority.LOW
+                }
+                priority = priority_map.get(priority_str, TaskPriority.MEDIUM)
+                
+                # Create evidence with symbol hint if provided
+                symbol_hint = raw.get("symbol_hint", "unknown")
+                evidence = TaskEvidence(
+                    symbol=symbol_hint,
+                    metric_type="llm_discovered",
+                    metric_value=0,
+                    file_path="unknown",
+                    source="llm"
+                )
+                
+                task = AnalysisTask(
+                    id=f"task_llm_{uuid.uuid4().hex[:12]}",
+                    title=raw.get("title", "LLM Suggested Task")[:60],
+                    description=raw.get("description", ""),
+                    category=category,
+                    priority=priority,
+                    status=TaskStatus.PENDING,
+                    evidence=[evidence],
+                    suggested_fix=raw.get("suggested_fix", ""),
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                tasks.append(task)
+                
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse LLM response: {e}")
+            print(f"Response excerpt: {response[:500]}")
+        
+        return tasks
+    
+    def generate_only_llm_tasks(self, max_tasks: int = None) -> List[AnalysisTask]:
+        """
+        Generate ONLY LLM-discovered tasks, no rule-based tasks.
+        Useful for getting AI suggestions without rule-based noise.
+        """
+        if not self.config.llm_enabled:
+            return []
+        
+        max_tasks = max_tasks or self.config.llm_max_tasks
+        
+        # Build lighter context for AI-only generation
+        review_context = self.crawler.build_review_context()
+        hotspots = review_context.get("hotspots", [])[:10]  # Fewer hotspots for context
+        arch_summary = review_context.get("architecture_summary", {})
+        
+        prompt = self._build_ai_only_prompt(hotspots, arch_summary, max_tasks)
+        
+        try:
+            response = self.llm.generate(prompt)
+            tasks = self._parse_llm_response(response)
+            return tasks[:max_tasks]
+        except Exception as e:
+            print(f"AI-only task discovery failed: {e}")
+            return []
+
+    def _build_ai_only_prompt(self, hotspots: List[Dict], arch_summary: Dict, max_tasks: int) -> str:
+        """Build prompt for AI-only task generation with code context"""
+        
+        # Get actual code snippets for top hotspots
+        code_context = ""
+        for h in hotspots[:5]:
+            symbol = h.get("symbol")
+            if symbol:
+                # Try to get actual source code
+                symbol_info = self.crawler._extract_symbols(self.crawler.index_service.get_index()).get(symbol, {})
+                file_path = symbol_info.get("file", "")
+                if file_path and Path(file_path).exists():
+                    try:
+                        lines = Path(file_path).read_text(encoding="utf-8").splitlines()
+                        # Get first 30 lines of the function (simplified - would need line numbers)
+                        code_context += f"\n### {symbol} in {file_path}\n```python\n"
+                        # This is simplified - you'd need actual line ranges from symbols
+                        code_context += "\n".join(lines[:50]) + "\n```\n"
+                    except:
+                        pass
+        
+        return f"""You are a senior software engineer. Analyze this code and provide SPECIFIC, ACTIONABLE tasks.
+
+    CONTEXT:
+    - Total functions: {arch_summary.get('total_nodes', 0)}
+    - Top hotspots: {hotspots[:5] if hotspots else 'None'}
+
+    CODE SAMPLES:
+    {code_context}
+
+    Generate {max_tasks} specific tasks. Each task must include:
+
+    1. EXACT file path and line numbers
+    2. CURRENT code snippet (what's wrong)
+    3. REPLACEMENT code snippet (the fix)
+    4. Why the fix improves the code
+
+    Return ONLY valid JSON:
+    {{
+    "tasks": [
+        {{
+        "title": "Fix [specific issue] in [function name]",
+        "description": "What is wrong and why",
+        "file_path": "exact/path/to/file.py",
+        "line_start": 42,
+        "line_end": 56,
+        "current_code": "def get():\n    return data",
+        "replacement_code": "def get():\n    for item in data:\n        yield item",
+        "category": "performance|maintainability|security",
+        "priority": "critical|high|medium|low"
+        }}
+    ]
+    }}"""
+
+# ========================================
+# FILE: .\backend\services\task\task_generator.py
+# ========================================
+
+import uuid
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+from backend.models.task import (
+    AnalysisTask, TaskCategory, TaskPriority, 
+    TaskStatus, TaskEvidence
+)
+from backend.services.analysis.crawler_review_service import CrawlerReviewService
+from backend.services.graph.call_graph_service import CallGraphService
+from backend.config.task_config import TaskConfig
+from backend.services.task.llm_task_discovery import LLMTaskDiscovery
+
+
+class TaskGenerator:
+    """Generates actionable tasks from codebase analysis"""
+
+    def __init__(self, crawler_service: CrawlerReviewService, graph_service: CallGraphService, project_id: str):
+        self.crawler = crawler_service
+        self.graph = graph_service
+        self.config = TaskConfig(project_id)
+        self.llm_discovery = LLMTaskDiscovery(crawler_service, graph_service, self.config.get())
+
+    def generate_tasks(self, include_llm: bool = True) -> List[AnalysisTask]:
+        """Generate all tasks from current analysis"""
+        review_context = self.crawler.build_review_context()
+        hotspots = review_context.get("hotspots", [])
+        symbols = review_context.get("symbols", {})
+
+        tasks = []
+
+        # Rule-based tasks from hotspots
+        for hotspot in hotspots:
+            task = self._create_task_from_hotspot(hotspot, symbols)
+            if task:
+                tasks.append(task)
+
+        # LLM-discovered tasks
+        if include_llm and self.config.get().llm_enabled:
+            llm_tasks = self.llm_discovery.discover_tasks()
+            tasks.extend(llm_tasks)
+
+        return tasks
+
+    def _create_task_from_hotspot(self, hotspot: Dict[str, Any], symbols: Dict) -> Optional[AnalysisTask]:
+        """Create a task from a hotspot detection using configured thresholds"""
+        hotspot_type = hotspot.get("type")
+        symbol_name = hotspot.get("symbol")
+        count = hotspot.get("count", 0)
+
+        if hotspot_type == "fan_out":
+            return self._create_coupling_task(symbol_name, count, symbols)
+        elif hotspot_type == "fan_in":
+            return self._create_usage_task(symbol_name, count, symbols)
+
+        return None
+
+    def _get_priority_from_threshold(self, count: int, medium: int, high: int, critical: int) -> TaskPriority:
+        """Determine priority based on configured thresholds"""
+        if count > critical:
+            return TaskPriority.CRITICAL
+        elif count > high:
+            return TaskPriority.HIGH
+        elif count > medium:
+            return TaskPriority.MEDIUM
+        else:
+            return TaskPriority.LOW
+
+    def _create_coupling_task(self, symbol_name: str, fan_out_count: int, symbols: Dict) -> AnalysisTask:
+        """Create task for high coupling using configured thresholds"""
+        symbol_info = symbols.get(symbol_name, {})
+        
+        priority = self._get_priority_from_threshold(
+            fan_out_count,
+            self.config.get().fan_out_medium,
+            self.config.get().fan_out_high,
+            self.config.get().fan_out_critical
+        )
+
+        evidence = TaskEvidence(
+            symbol=symbol_name,
+            metric_type="fan_out",
+            metric_value=fan_out_count,
+            file_path=symbol_info.get("file", "unknown"),
+            callees=symbol_info.get("calls", [])[:20],
+            source="rule_based"
+        )
+
+        suggested_fix = f"""Reduce coupling in {symbol_name} by extracting helper functions.
+
+This function calls {fan_out_count} other functions. Move related calls into separate helper functions prefixed with '_'. Test each helper individually."""
+
+        return AnalysisTask(
+            id=f"task_coupling_{symbol_name}_{uuid.uuid4().hex[:8]}",
+            title=f"High coupling in {symbol_name}",
+            description=f"Function '{symbol_name}' calls {fan_out_count} other functions. This indicates too many responsibilities.",
+            category=TaskCategory.HIGH_COUPLING,
+            priority=priority,
+            status=TaskStatus.PENDING,
+            evidence=[evidence],
+            suggested_fix=suggested_fix
+        )
+
+    def _create_usage_task(self, symbol_name: str, fan_in_count: int, symbols: Dict) -> AnalysisTask:
+        """Create task for high usage using configured thresholds"""
+        symbol_info = symbols.get(symbol_name, {})
+        
+        priority = self._get_priority_from_threshold(
+            fan_in_count,
+            self.config.get().fan_in_medium,
+            self.config.get().fan_in_high,
+            self.config.get().fan_in_critical
+        )
+
+        evidence = TaskEvidence(
+            symbol=symbol_name,
+            metric_type="fan_in",
+            metric_value=fan_in_count,
+            file_path=symbol_info.get("file", "unknown"),
+            callers=symbol_info.get("called_by", [])[:20],
+            source="rule_based" 
+        )
+
+        suggested_fix = f"""Add an abstraction layer around {symbol_name}.
+
+This function is called by {fan_in_count} other functions. Create an interface/abstract class, then update callers to depend on the abstraction instead of the concrete function."""
+
+        return AnalysisTask(
+            id=f"task_usage_{symbol_name}_{uuid.uuid4().hex[:8]}",
+            title=f"High usage of {symbol_name}",
+            description=f"Function '{symbol_name}' is called by {fan_in_count} other functions. Changes here will break many dependents.",
+            category=TaskCategory.HIGH_USAGE,
+            priority=priority,
+            status=TaskStatus.PENDING,
+            evidence=[evidence],
+            suggested_fix=suggested_fix
+        )
+    
+    def generate_ai_only_tasks(self) -> List[AnalysisTask]:
+        """Generate ONLY AI-discovered tasks (no rule-based)"""
+        if not self.config.get().llm_enabled:
+            return []
+        
+        return self.llm_discovery.generate_only_llm_tasks()   
+        
+        
+        
+
+# ========================================
+# FILE: .\backend\services\task\task_storage.py
+# ========================================
+
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+from backend.models.task import AnalysisTask, TaskStatus, TaskCategory, TaskPriority, TaskEvidence
+
+
+class TaskStorage:
+    """Persistent storage for tasks (JSON file-based)"""
+
+    def __init__(self, project_id: str, data_dir: Path):
+        self.project_id = project_id
+        self.tasks_file = data_dir / "tasks" / f"{project_id}.json"
+        self._ensure_dir()
+
+    def _ensure_dir(self):
+        """Ensure tasks directory exists"""
+        self.tasks_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def save_tasks(self, tasks: List[AnalysisTask]) -> None:
+        """Save all tasks to disk"""
+        data = {
+            "project_id": self.project_id,
+            "last_updated": datetime.now().isoformat(),
+            "tasks": [t.to_dict() for t in tasks]
+        }
+        self.tasks_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def load_tasks(self) -> List[Dict[str, Any]]:
+        """Load tasks from disk as dicts"""
+        if not self.tasks_file.exists():
+            return []
+        data = json.loads(self.tasks_file.read_text(encoding="utf-8"))
+        return data.get("tasks", [])
+
+    def _dict_to_task(self, task_dict: Dict[str, Any]) -> AnalysisTask:
+        """Convert a dictionary back to an AnalysisTask object"""
+        # Reconstruct evidence objects
+        evidence_objects = []
+        for e in task_dict.get("evidence", []):
+            evidence_objects.append(TaskEvidence(
+                symbol=e["symbol"],
+                metric_type=e["metric_type"],
+                metric_value=e["metric_value"],
+                file_path=e["file_path"],
+                line_range=e.get("line_range"),
+                callers=e.get("callers", []),
+                callees=e.get("callees", []),
+                source=e.get("source", "rule_based")
+            ))
+        
+        # Handle created_at and updated_at
+        created_at = task_dict.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        
+        updated_at = task_dict.get("updated_at")
+        if isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at)
+        
+        # Handle status - could be string or enum
+        status_value = task_dict.get("status")
+        if isinstance(status_value, str):
+            try:
+                status = TaskStatus(status_value)
+            except ValueError:
+                status = TaskStatus.PENDING
+        else:
+            status = status_value if hasattr(status_value, 'value') else TaskStatus.PENDING
+        
+        return AnalysisTask(
+            id=task_dict["id"],
+            title=task_dict["title"],
+            description=task_dict["description"],
+            category=TaskCategory(task_dict["category"]),
+            priority=TaskPriority(task_dict["priority"]),
+            status=status,
+            evidence=evidence_objects,
+            suggested_fix=task_dict.get("suggested_fix"),
+            impact_analysis=task_dict.get("impact_analysis"),
+            created_at=created_at,
+            updated_at=updated_at,
+            notes=task_dict.get("notes")
+        )
+
+    def update_task_status(self, task_id: str, status: TaskStatus, notes: Optional[str] = None) -> bool:
+        """Update a single task's status"""
+        tasks_dicts = self.load_tasks()
+        
+        for task_dict in tasks_dicts:
+            if task_dict["id"] == task_id:
+                task_dict["status"] = status.value if hasattr(status, 'value') else str(status)
+                task_dict["updated_at"] = datetime.now().isoformat()
+                if notes:
+                    task_dict["notes"] = notes
+                
+                # Convert all dicts back to AnalysisTask objects
+                analysis_tasks = []
+                for td in tasks_dicts:
+                    analysis_tasks.append(self._dict_to_task(td))
+                
+                self.save_tasks(analysis_tasks)
+                return True
+        return False
+
+# ========================================
 # FILE: .\backend\utils\__init__.py
 # ========================================
 
-
-
-# ========================================
-# FILE: .\scripts\test_crawler_review.py
-# ========================================
-
-import sys
-import os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from backend.services.indexing.index_service import IndexService
-from backend.services.graph.call_graph_service import CallGraphService
-from backend.services.analysis.crawler_review_service import CrawlerReviewService
-
-
-def run_test():
-
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-    # ✅ unified config
-    project_config = {
-        "project_id": "idm-dev-agent",
-        "root_path": project_root,
-        "name": "IDM-Dev-Agent",
-        "index_cache_enabled": False,
-        "language": "python"
-    }
-
-    # ----------------------------
-    # INDEX LAYER
-    # ----------------------------
-    index_service = IndexService(project_config)
-
-    # ----------------------------
-    # GRAPH LAYER (FIX HERE)
-    # ----------------------------
-    index_path = os.path.join(project_root, "backend", "services", "indexing")
-
-    graph_service = CallGraphService(index_path)
-
-    # ----------------------------
-    # REVIEW LAYER
-    # ----------------------------
-    review_service = CrawlerReviewService(
-        index_service=index_service,
-        graph_service=graph_service
-    )
-
-    result = review_service.build_review_context()
-
-    print("\n===== ARCHITECTURE SUMMARY =====\n")
-    print(result.get("architecture_summary"))
-
-    print("\n===== HOTSPOTS =====\n")
-    for h in result.get("hotspots", [])[:10]:
-        print(h)
-
-    print("\n===== MODULES =====\n")
-    print(result.get("modules")[:20])
-
-
-if __name__ == "__main__":
-    run_test()
-
-# ========================================
-# FILE: .\scripts\test_prompt_builder.py
-# ========================================
-
-from backend.services.agent.prompt_builder import PromptBuilder
-from backend.services.analysis.crawler_review_service import CrawlerReviewService
-from backend.services.indexing.index_service import IndexService
-from backend.services.graph.call_graph_service import CallGraphService
-
-
-def run_test():
-    index_service = IndexService()
-    graph_service = CallGraphService()
-
-    crawler = CrawlerReviewService(index_service, graph_service)
-    crawler_data = crawler.build_review_context()
-
-    builder = PromptBuilder()
-
-    prompt = builder.build(
-        intent="codebase_review",
-        symbol_data={
-            "symbol": "IDM-CODEBASE",
-            "type": "system",
-            "file": "ALL",
-            "parent": None,
-            "reasoning": crawler_data
-        },
-        question="Review the entire IDM crawler system and suggest improvements",
-        history=[]
-    )
-
-    print("\n================ PROMPT OUTPUT ================\n")
-    print(prompt)
-
-
-if __name__ == "__main__":
-    run_test()
